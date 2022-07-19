@@ -1,5 +1,5 @@
 .PHONY: all
 all:
-	@gcc -Wall editor.c -o editor
+	@gcc -Wall -Wno-unused-function editor.c -o editor
 	@./editor
 	@rm -f editor

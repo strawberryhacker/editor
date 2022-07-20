@@ -120,6 +120,8 @@ static CharArray framebuffer;
 static WindowArray windows;
 static FileArray files;
 
+static bool redraw_line[1024];
+
 static bool running = true;
 static int focused_window;
 static int editor_width;
@@ -587,20 +589,41 @@ static void update() {
 //--------------------------------------------------------------------------------------------------
 
 static void render_status_bar(Window* window) {
-  // Hmm...
+  int percent = 100 * window->cursor_y / window->file->lines.count;
+  int print_width = window->file->path.count + 1 + count_digits(percent) + 1 + 1;
+
+  set_window_cursor(window, window->width - print_width, window->height - 1);
+  print("%.*s %d%% ", window->file->path.count, window->file->path.items, percent);
 }
 
 //--------------------------------------------------------------------------------------------------
 
-static void render() {
-  static bool redraw[1024];
-  memset(redraw, 0, editor_height);
+static void render_window(Window* window) {
+  int width, height;
+  get_active_size(window, &width, &height);
 
-  for (int i = 0; i < windows.count; i++) {
-    update_window_offsets(windows.items[i]);
+  int number_width = count_digits(window->file->lines.count);
+
+  for (int j = 0; j < get_visible_line_count(window); j++) {
+    if (!redraw_line[window->position_y + j]) continue;
+
+    Line* line = window->file->lines.items[window->offset_y + j];
+
+    set_window_cursor(window, 0, j);
+
+    print("%*d", number_width, window->position_y + j);
+    print("%*c", LinenumberMargin, ' ');
+    print("%.*s", max(min(line->chars.count - window->offset_x, width), 0), &line->chars.items[window->offset_x]);
   }
 
-  // Mark lines for redraw.
+  render_status_bar(window);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void mark_lines_for_redraw() {
+  memset(redraw_line, 0, editor_height);
+
   for (int i = 0; i < windows.count; i++) {
     Window* window = windows.items[i];
 
@@ -610,7 +633,7 @@ static void render() {
       window->moved = false;
 
       for (int j = 0; j < window->height; j++) {
-        redraw[window->position_y + j] = true;
+        redraw_line[window->position_y + j] = true;
       }
     }
 
@@ -620,47 +643,36 @@ static void render() {
 
       if (line->dirty) {
         line->dirty = false;
-        redraw[window->position_y + j] = true;
+        redraw_line[window->position_y + j] = true;
       }
     }
 
     // Redraw status bars.
     for (int j = 0; j < StatusBarCount; j++) {
-      redraw[window->position_y + window->height - j - 1] = true;
+      redraw_line[window->position_y + window->height - j - 1] = true;
     }
   }
+}
 
-  // Clear lines to be redrawn.
+//--------------------------------------------------------------------------------------------------
+
+static void render() {
+  for (int i = 0; i < windows.count; i++) {
+    update_window_offsets(windows.items[i]);
+  }
+
+  mark_lines_for_redraw();
+
   for (int i = 0; i < editor_height; i++) {
-    if (redraw[i]) {
+    if (redraw_line[i]) {
       clear_line(i);
     }
   }
 
   hide_cursor();
   
-  // Render.
   for (int i = 0; i < windows.count; i++) {
-    Window* window = windows.items[i];
-
-    int width, height;
-    get_active_size(window, &width, &height);
-
-    int number_width = count_digits(window->file->lines.count);
-
-    for (int j = 0; j < get_visible_line_count(window); j++) {
-      if (!redraw[window->position_y + j]) continue;
-
-      Line* line = window->file->lines.items[window->offset_y + j];
-
-      set_window_cursor(window, 0, j);
-
-      print("%*d", number_width, window->position_y + j);
-      print("%*c", LinenumberMargin, ' ');
-      print("%.*s", max(min(line->chars.count - window->offset_x, width), 0), &line->chars.items[window->offset_x]);
-    }
-
-    render_status_bar(window);
+    render_window(windows.items[i]);
   }
 
   Window* window = windows.items[focused_window];

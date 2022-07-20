@@ -21,6 +21,9 @@
 #define LinenumberMargin           2
 #define StatusBarCount             1
 
+#define WindowFocusNext KeyCodeShiftRight
+#define WindowFocusPrevious KeyCodeShiftLeft
+
 //--------------------------------------------------------------------------------------------------
 
 #define min(x, y) (((int)(x) < (int)(y)) ? x : y)
@@ -44,6 +47,7 @@ define_array(window_array, WindowArray, Window* );
 
 enum {
   KeyCodeCtrlC          = 3,
+  KeyCodeCapsDelete     = 8,
   KeyCodeTab            = 9,
   KeyCodeEnter          = 10,
   KeyCodeEscape         = 27,
@@ -664,6 +668,7 @@ static void editor_handle_keypress(Window* window, int keycode) {
       update_window_cursor_x(window, window->file->lines.items[window->cursor_y]->chars.count);
       break;
     
+    case KeyCodeCapsDelete:
     case KeyCodeDelete: {
       int delete_count = 1;
       int space_count = get_leading_spaces(window->file->lines.items[window->cursor_y]);
@@ -691,6 +696,14 @@ static void editor_handle_keypress(Window* window, int keycode) {
       file_insert_char(window, '\n');
       break;
     
+    case WindowFocusNext:
+      if (++focused_window == windows.count) focused_window = 0;
+      break;
+
+    case WindowFocusPrevious:
+      if (--focused_window < 0) focused_window = windows.count - 1;
+      break;
+
     default:
       if (KeyCodePrintableStart <= keycode && keycode <= KeyCodePrintableEnd) {
         file_insert_char(window, keycode);
@@ -724,10 +737,16 @@ static void update() {
 //--------------------------------------------------------------------------------------------------
 
 static void render_status_bar(Window* window) {
+  const char* active_string = "active ";
+
+  bool focus = (window == windows.items[focused_window]); // Todo: Improve.
+
   int percent = 100 * window->cursor_y / window->file->lines.count;
-  int print_width = window->file->path.count + 1 + count_digits(percent) + 1 + 1;
+  int active_width = focus ? sizeof(active_string) - 1 : 0;
+  int print_width = active_width + 1 + window->file->path.count + 1 + count_digits(percent) + 1 + 1;
 
   set_window_cursor(window, window->width - print_width, window->height - 1);
+  if (focus) print("%s", active_string);
   print("%.*s %d%% ", window->file->path.count, window->file->path.items, percent);
 }
 
@@ -882,20 +901,27 @@ int main() {
 
   int width, height;
   get_terminal_size(&width, &height);
+  editor_width = width;
+  editor_height = height;
+
+  int half = editor_width / 2;
 
   char test_file[] = "test.txt";
   Window* window = calloc(1, sizeof(Window));
   window->file = open_file(test_file, sizeof(test_file) - 1);
-
   window->moved = true;
-
-  window->width = width;
+  window->width = half;
   window->height = height;
-
-  editor_width = width;
-  editor_height = height;
-
   window_array_append(&windows, window);
+  focused_window = 0;
+
+  Window* window1 = calloc(1, sizeof(Window));
+  window1->file = open_file(test_file, sizeof(test_file) - 1);
+  window1->moved = true;
+  window1->width = editor_width - half;
+  window1->position_x = half;
+  window1->height = height;
+  window_array_append(&windows, window1);
   focused_window = 0;
 
   while (running) {

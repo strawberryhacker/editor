@@ -26,7 +26,19 @@
 #define min(x, y) (((int)(x) < (int)(y)) ? x : y)
 #define max(x, y) (((int)(x) < (int)(y)) ? y : x)
 
-//--------------------------------------------------------------------------------------------------
+aesunt oaesnu
+h ano
+hns
+n
+ hano
+ h anos
+ h sn
+ hns
+  hsn
+   s
+    s
+     
+     //--------------------------------------------------------------------------------------------------
 
 typedef struct termios Termios;
 typedef struct Line Line;

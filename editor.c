@@ -446,7 +446,21 @@ static File* create_file(char* path, int path_size) {
 //--------------------------------------------------------------------------------------------------
 
 static bool save_file(File* file) {
-  // Todo.
+  LineArray* lines = &file->lines;
+
+  int fd = open(file->path.items, O_WRONLY | O_CREAT | O_TRUNC, 0666); // Do we want r/w for all users?
+  if (fd < 0) return false;
+
+  for (int i = 0; i < lines->count; i++) {
+    if (i) write(fd, "\r\n", 2);
+
+    Line* line = lines->items[i];
+    write(fd, line->chars.items, line->chars.count);
+  }
+
+  close(fd);
+
+  file->unsaved = false;
   return true;
 }
 
@@ -698,6 +712,7 @@ static void file_delete_char(Window* window) {
 static void editor_handle_keypress(Window* window, int keycode) {
   if (KeyCodePrintableStart <= keycode && keycode <= KeyCodePrintableEnd) {
     file_insert_char(window, keycode);
+    window->file->unsaved = true;
   }
   else switch (keycode) {
     case KeyCodeUp:
@@ -726,6 +741,7 @@ static void editor_handle_keypress(Window* window, int keycode) {
     
     case KeyCodeCapsDelete:
     case KeyCodeDelete: {
+      window->file->unsaved = true;
       int delete_count = 1;
       int space_count = get_leading_spaces(window->file->lines.items[window->cursor_y]);
 
@@ -743,12 +759,14 @@ static void editor_handle_keypress(Window* window, int keycode) {
     }
 
     case KeyCodeTab:
+      window->file->unsaved = true;
       for (int i = 0; i < SpacesPerTab; i++) {
         file_insert_char(window, ' ');
       }
       break;
 
     case KeyCodeEnter:
+      window->file->unsaved = true;
       file_insert_char(window, '\n');
       break;
     
@@ -764,6 +782,12 @@ static void editor_handle_keypress(Window* window, int keycode) {
       window->bar.focused = true;
       window->bar.type = BarTypeOpen;
       break;
+    
+    case UserKeySave:
+      if (!save_file(window->file)) {
+        debug_print("Cant save file\n");
+      }
+      break;
 
     default:
       debug_print("Unhandled window keycode: %d\n", keycode);
@@ -773,7 +797,8 @@ static void editor_handle_keypress(Window* window, int keycode) {
 //--------------------------------------------------------------------------------------------------
 
 static void change_file(Window* window, File* file) {
-  window->file = file;
+  // Todo: save information in a separate structure per window per file for later reuse.
+  window->file = file;  
   window->redraw = true;
   window->cursor_x = 0;
   window->cursor_y = 0;
@@ -893,6 +918,10 @@ static void render_status_bar(Window* window) {
   int percent = 100 * window->cursor_y / window->file->lines.count;
   int active_width = focus ? sizeof(active_string) - 1 : 0;
   int left_size = active_width + 1 + window->file->path.count + 1 + count_digits(percent) + 1 + 1;
+  if (window->file->unsaved) {
+    left_size++;
+  }
+
   int width_left = window->width - left_size;
 
   Bar* bar = &window->bar;
@@ -911,6 +940,7 @@ static void render_status_bar(Window* window) {
 
   set_window_cursor(window, window->width - left_size, window->height - 1);
   if (focus) print("%s", active_string);
+  if (window->file->unsaved) print("*");
   print("%.*s %d%% ", window->file->path.count, window->file->path.items, percent);
 }
 

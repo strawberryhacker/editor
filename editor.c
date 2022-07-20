@@ -906,7 +906,7 @@ int main() {
 
   int half = editor_width / 2;
 
-  char test_file[] = "test.txt";
+  char test_file[] = "test/test.txt";
   Window* window = calloc(1, sizeof(Window));
   window->file = open_file(test_file, sizeof(test_file) - 1);
   window->moved = true;
@@ -916,7 +916,7 @@ int main() {
   focused_window = 0;
 
   Window* window1 = calloc(1, sizeof(Window));
-  window1->file = open_file(test_file, sizeof(test_file) - 1);
+  window1->file = window->file;
   window1->moved = true;
   window1->width = editor_width - half;
   window1->position_x = half;

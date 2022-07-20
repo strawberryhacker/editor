@@ -127,10 +127,6 @@ static int focused_window;
 static int editor_width;
 static int editor_height;
 
-// Try to not segfault if event happen in render.
-static int new_editor_width;
-static int new_editor_height;
-
 //--------------------------------------------------------------------------------------------------
 
 // Forward declarations.
@@ -561,6 +557,14 @@ static void editor_handle_keypress(Window* window, int keycode) {
     case KeyCodeRight:
       update_window_cursor_x(window, window->cursor_x + 1);
       break;
+
+    case KeyCodeHome:
+      update_window_cursor_x(window, 0);
+      break;
+
+    case KeyCodeEnd:
+      update_window_cursor_x(window, window->file->lines.items[window->cursor_y]->chars.count);
+      break;
     
     default: 
       debug_print("Unhandled window keycode: %d\n", keycode);
@@ -688,7 +692,22 @@ static void render() {
 //--------------------------------------------------------------------------------------------------
 
 static void window_resize_handler(int signal) {
-  debug_print("Window resize\r\n");
+  Window* window = windows.items[focused_window];
+
+  for (int i = 0; i < windows.count; i++) {
+    windows.items[i]->moved = true;
+  }
+
+  int width, height;
+  get_terminal_size(&width, &height);
+
+  window->width = width;
+  window->height = height;
+
+  editor_width = width;
+  editor_height = height;
+
+  render();
 }
 
 //--------------------------------------------------------------------------------------------------

@@ -18,11 +18,10 @@
 #define WindowCursorMarginBottom   10
 #define WindowCursorMarginLeft     10
 #define WindowCursorMarginRight    10
+#define BarCursorMarginLeft        5
+#define BarCursorMarginRight       5
 #define LinenumberMargin           2
 #define StatusBarCount             1
-
-#define WindowFocusNext KeyCodeShiftRight
-#define WindowFocusPrevious KeyCodeShiftLeft
 
 //--------------------------------------------------------------------------------------------------
 
@@ -34,6 +33,7 @@
 typedef struct termios Termios;
 typedef struct Line Line;
 typedef struct File File;
+typedef struct Bar Bar;
 typedef struct Window Window;
 
 //--------------------------------------------------------------------------------------------------
@@ -46,15 +46,19 @@ define_array(window_array, WindowArray, Window* );
 //--------------------------------------------------------------------------------------------------
 
 enum {
-  KeyCodeCtrlC          = 3,
-  KeyCodeCapsDelete     = 8,
   KeyCodeTab            = 9,
   KeyCodeEnter          = 10,
   KeyCodeEscape         = 27,
+  KeyCodeDelete         = 127,
+  KeyCodeCapsDelete     = 8,
+
+  KeyCodeCtrlC          = 3,
+  KeyCodeCtrlG          = 7,
+  KeyCodeCtrlN          = 14,
+  KeyCodeCtrlS          = 19,
 
   KeyCodePrintableStart = 32,
   KeyCodePrintableEnd   = 126,
-  KeyCodeDelete         = 127,
 
   KeyCodeAsciiEnd       = 255,
 
@@ -83,6 +87,24 @@ enum {
 
 //--------------------------------------------------------------------------------------------------
 
+enum {
+  BarTypeOpen,
+  BarTypeCount,
+};
+
+//--------------------------------------------------------------------------------------------------
+
+enum {
+  UserKeyFocusNext     = KeyCodeShiftRight,
+  UserKeyFocusPrevious = KeyCodeShiftLeft,
+  UserKeyExit          = KeyCodeCtrlC,
+  UserKeyOpen          = KeyCodeCtrlG,
+  UserKeyNew           = KeyCodeCtrlN,
+  UserKeySave          = KeyCodeCtrlS,
+};
+
+//--------------------------------------------------------------------------------------------------
+
 struct Line {
   CharArray chars;
 
@@ -101,6 +123,16 @@ struct File {
 
 //--------------------------------------------------------------------------------------------------
 
+struct Bar {
+  int type;
+  int cursor;
+  int offset;
+  bool focused;
+  CharArray chars;
+};
+
+//--------------------------------------------------------------------------------------------------
+
 struct Window {
   File* file;
 
@@ -115,10 +147,10 @@ struct Window {
 
   int cursor_x;
   int cursor_y;
-
   int ideal_cursor_x;
 
   bool moved;
+  Bar bar;
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -127,6 +159,10 @@ static Termios saved_terminal;
 static CharArray framebuffer;
 static WindowArray windows;
 static FileArray files;
+
+static char* bar_message[BarTypeCount] = {
+  [BarTypeOpen] = " open: ",
+};
 
 static bool redraw_line[1024];
 
@@ -305,6 +341,9 @@ static int get_input() {
   else if (keys[0] != KeyCodeEscape) {
     code = keys[0];
   }
+  else if (keys[0] == KeyCodeEscape && size == 1) {
+    code = KeyCodeEscape;
+  }
 
   return code;
 }
@@ -466,6 +505,12 @@ static int count_digits(int number) {
 
 static int get_left_padding(Window* window) {
   return count_digits(window->file->lines.count) + LinenumberMargin;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static int get_left_bar_padding(Window* window) {
+  return strlen(bar_message[window->bar.type]);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -643,7 +688,10 @@ static void file_delete_char(Window* window) {
 //--------------------------------------------------------------------------------------------------
 
 static void editor_handle_keypress(Window* window, int keycode) {
-  switch (keycode) {
+  if (KeyCodePrintableStart <= keycode && keycode <= KeyCodePrintableEnd) {
+    file_insert_char(window, keycode);
+  }
+  else switch (keycode) {
     case KeyCodeUp:
       update_window_cursor_y(window, window->cursor_y - 1);
       break;
@@ -696,21 +744,75 @@ static void editor_handle_keypress(Window* window, int keycode) {
       file_insert_char(window, '\n');
       break;
     
-    case WindowFocusNext:
+    case UserKeyFocusNext:
       if (++focused_window == windows.count) focused_window = 0;
       break;
 
-    case WindowFocusPrevious:
+    case UserKeyFocusPrevious:
       if (--focused_window < 0) focused_window = windows.count - 1;
       break;
 
+    case UserKeyOpen:
+      window->bar.focused = true;
+      window->bar.type = BarTypeOpen;
+      break;
+
     default:
-      if (KeyCodePrintableStart <= keycode && keycode <= KeyCodePrintableEnd) {
-        file_insert_char(window, keycode);
+      debug_print("Unhandled window keycode: %d\n", keycode);
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void handle_bar_command(Window* window) {
+  Bar* bar = &window->bar;
+  debug_print("Got command: %.*s\n", bar->chars.count, bar->chars.items);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void bar_handle_keypress(Window* window, int keycode) {
+  Bar* bar = &window->bar;
+
+  if (KeyCodePrintableStart <= keycode && keycode <= KeyCodePrintableEnd) {
+    char_array_insert(&bar->chars, keycode, bar->cursor++);
+  }
+  else switch (keycode) {
+    case KeyCodeEscape:
+      bar->focused = false;
+      break;
+
+    case KeyCodeLeft:
+      bar->cursor = max(bar->cursor - 1, 0);
+      break;
+
+    case KeyCodeRight:
+      bar->cursor = min(bar->cursor + 1, bar->chars.count);
+      break;
+
+    case KeyCodeHome:
+      bar->cursor = 0;
+      break;
+
+    case KeyCodeEnd:
+      bar->cursor = bar->chars.count;
+      break;
+    
+    case KeyCodeCapsDelete:
+    case KeyCodeDelete:
+      if (bar->cursor) {
+        char_array_remove(&bar->chars, bar->cursor - 1);
+        bar->cursor--;
       }
-      else {
-        debug_print("Unhandled window keycode: %d\n", keycode);
-      }
+      break;
+
+    case KeyCodeEnter:
+      handle_bar_command(window);
+      bar->focused = false;
+      break;
+    
+    default:
+      debug_print("Unhandled bar keycode: %d\n", keycode);
   }
 }
 
@@ -720,15 +822,22 @@ static void update() {
   while (1) {
     int keycode = get_input();
 
-    if (keycode == KeyCodeCtrlC) {
+    if (keycode == UserKeyExit) {
       running = false;
       return;
     }
 
     if (keycode != KeyCodeNone) {
       Window* window = windows.items[focused_window];
-      editor_handle_keypress(window, keycode);
-      previous_keycode = keycode;
+
+      if (window->bar.focused) {
+        bar_handle_keypress(window, keycode);
+      }
+      else {
+        editor_handle_keypress(window, keycode);
+        previous_keycode = keycode;
+      }
+
       break;
     }
   }
@@ -743,9 +852,24 @@ static void render_status_bar(Window* window) {
 
   int percent = 100 * window->cursor_y / window->file->lines.count;
   int active_width = focus ? sizeof(active_string) - 1 : 0;
-  int print_width = active_width + 1 + window->file->path.count + 1 + count_digits(percent) + 1 + 1;
+  int left_size = active_width + 1 + window->file->path.count + 1 + count_digits(percent) + 1 + 1;
+  int width_left = window->width - left_size;
 
-  set_window_cursor(window, window->width - print_width, window->height - 1);
+  Bar* bar = &window->bar;
+
+  set_window_cursor(window, 0, window->height - 1);
+
+  if (bar->focused) {
+    width_left -= print("%s", bar_message[bar->type]);
+    width_left -= 1; // Padding.
+
+    bar->offset = get_updated_offset(bar->cursor, bar->offset, width_left, BarCursorMarginLeft, BarCursorMarginRight);
+    int bar_size = min(bar->chars.count - bar->offset ,width_left);
+
+    width_left -= print("%.*s", bar_size, &bar->chars.items[bar->offset]);
+  }
+
+  set_window_cursor(window, window->width - left_size, window->height - 1);
   if (focus) print("%s", active_string);
   print("%.*s %d%% ", window->file->path.count, window->file->path.items, percent);
 }
@@ -831,8 +955,18 @@ static void render() {
 
   Window* window = windows.items[focused_window];
 
-  int cursor_x = window->cursor_x - window->offset_x + get_left_padding(window);
-  int cursor_y = window->cursor_y - window->offset_y;
+  int cursor_x;
+  int cursor_y;
+
+  if (window->bar.focused) {
+    cursor_x = window->bar.cursor - window->bar.offset + get_left_bar_padding(window);
+    cursor_y = window->height - 1;
+    debug_print("cursor: %d\n", cursor_x);
+  }
+  else {
+    cursor_x = window->cursor_x - window->offset_x + get_left_padding(window);
+    cursor_y = window->cursor_y - window->offset_y;
+  }
 
   set_window_cursor(window, cursor_x, cursor_y);
   show_cursor();

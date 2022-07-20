@@ -17,3 +17,9 @@ make something usable while keeping the code base small.
 [ ] - dynamic window layout
 [ ] - mark based editing
 [ ] - shortcuts for most used features
+
+Controls
+--------
+
+Shift-Left - focus next window
+Shift-Right - focus previous window

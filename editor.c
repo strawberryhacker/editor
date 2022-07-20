@@ -149,7 +149,7 @@ struct Window {
   int cursor_y;
   int ideal_cursor_x;
 
-  bool moved;
+  bool redraw;
   Bar bar;
 };
 
@@ -373,6 +373,14 @@ static void delete_file(File* file) {
 //--------------------------------------------------------------------------------------------------
 
 static File* open_file(char* path, int path_size) {
+  for (int i = 0; i < files.count; i++) {
+
+    File* file = files.items[i];
+    if (path_size == file->path.count && !memcmp(path, file->path.items, path_size)) {
+      return file;
+    }
+  }
+
   assert(path_size < 64);
   char open_path[64];
 
@@ -559,7 +567,7 @@ static void update_window_offsets(Window* window) {
   window->offset_y = get_updated_offset(window->cursor_y, window->offset_y, height, WindowCursorMarginTop, WindowCursorMarginBottom);
 
   if (window->offset_x != prev_offset_x || window->offset_y != prev_offset_y) {
-    window->moved = true;
+    window->redraw = true;
   }
 }
 
@@ -681,7 +689,7 @@ static void file_delete_char(Window* window) {
     update_window_cursor_y(window, window->cursor_y - 1);
 
     window->file->dirty = true;
-    window->moved = true;
+    window->redraw = true;
   }
 }
 
@@ -764,9 +772,41 @@ static void editor_handle_keypress(Window* window, int keycode) {
 
 //--------------------------------------------------------------------------------------------------
 
+static void change_file(Window* window, File* file) {
+  window->file = file;
+  window->redraw = true;
+  window->cursor_x = 0;
+  window->cursor_y = 0;
+  window->offset_x = 0;
+  window->offset_y = 0;
+  window->ideal_cursor_x = 0;
+}
+
+//--------------------------------------------------------------------------------------------------
+
 static void handle_bar_command(Window* window) {
   Bar* bar = &window->bar;
   debug_print("Got command: %.*s\n", bar->chars.count, bar->chars.items);
+
+  switch (bar->type) {
+    case BarTypeOpen: {
+      File* file = open_file(bar->chars.items, bar->chars.count);
+      
+      if (file) {
+        change_file(window, file);
+      }
+      else {
+        debug_print("Cant open file\n");
+      }
+      break;
+    }
+
+    default:
+      debug_print("Unhandled bar type\n");
+  }
+
+  // More error handling is needed.
+  char_array_clear(&bar->chars);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -906,9 +946,9 @@ static void mark_lines_for_redraw() {
     Window* window = windows.items[i];
 
     // Redraw entire occupied region if either the window is moved or the file is dirty.
-    if (window->file->dirty || window->moved) {
+    if (window->file->dirty || window->redraw) {
       window->file->dirty = false;
-      window->moved = false;
+      window->redraw = false;
 
       for (int j = 0; j < window->height; j++) {
         redraw_line[window->position_y + j] = true;
@@ -979,7 +1019,7 @@ static void window_resize_handler(int signal) {
   Window* window = windows.items[focused_window];
 
   for (int i = 0; i < windows.count; i++) {
-    windows.items[i]->moved = true;
+    windows.items[i]->redraw = true;
   }
 
   int width, height;
@@ -1043,7 +1083,7 @@ int main() {
   char test_file[] = "test/test.txt";
   Window* window = calloc(1, sizeof(Window));
   window->file = open_file(test_file, sizeof(test_file) - 1);
-  window->moved = true;
+  window->redraw = true;
   window->width = half;
   window->height = height;
   window_array_append(&windows, window);
@@ -1051,7 +1091,7 @@ int main() {
 
   Window* window1 = calloc(1, sizeof(Window));
   window1->file = window->file;
-  window1->moved = true;
+  window1->redraw = true;
   window1->width = editor_width - half;
   window1->position_x = half;
   window1->height = height;

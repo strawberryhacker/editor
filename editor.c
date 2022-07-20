@@ -8,6 +8,8 @@
 #include "stdbool.h"
 #include "fcntl.h"
 #include "sys/stat.h"
+#include "sys/time.h"
+#include "sys/select.h"
 
 //--------------------------------------------------------------------------------------------------
 
@@ -27,6 +29,39 @@ define_array(char_array, CharArray, char);
 define_array(line_array, LineArray, Line* );
 define_array(file_array, FileArray, File* );
 define_array(window_array, WindowArray, Window* );
+
+//--------------------------------------------------------------------------------------------------
+
+enum {
+  KeyCodeCtrlC          = 3,
+  KeyCodeEscape         = 27,
+
+  KeyCodePrintableStart = 32,
+  KeyCodePrintableEnd   = 126,
+
+  KeyCodeAsciiEnd       = 255,
+  KeyCodeUnknown        = 256,
+  KeyCodeNone           = 257,
+
+  KeyCodeLeft,
+  KeyCodeRight,
+  KeyCodeUp,
+  KeyCodeDown,
+  KeyCodeEnd,
+  KeyCodeHome,
+
+  KeyCodeShiftLeft,
+  KeyCodeShiftRight,
+  KeyCodeShiftUp,
+  KeyCodeShiftDown,
+  KeyCodeShiftEnd,
+  KeyCodeShiftHome,
+
+  KeyCodeCtrlLeft,
+  KeyCodeCtrlRight,
+  KeyCodeCtrlUp,
+  KeyCodeCtrlDown,
+};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -99,6 +134,8 @@ static Line* append_line(File* file);
 static void delete_line(Line* line);
 
 static void append_chars(Line* line, char* data, int size);
+
+static int get_input();
 
 static void window_resize_handler(int signal);
 static void terminal_deinit();
@@ -330,6 +367,60 @@ static void append_chars(Line* line, char* data, int size) {
 
 //--------------------------------------------------------------------------------------------------
 
+static int get_input() {
+  char keys[64];
+  int size = read(STDIN_FILENO, keys, sizeof(keys));
+  if (!size) return KeyCodeNone;
+
+  int code = KeyCodeNone;
+
+  if (size >= 3 && keys[0] == '\x1b' && keys[1] == '[') {
+    if (size == 3) {
+      switch (keys[2]) {
+        case 'D': code = KeyCodeLeft;     break;
+        case 'C': code = KeyCodeRight;    break;
+        case 'A': code = KeyCodeUp;       break;
+        case 'B': code = KeyCodeDown;     break;
+        case 'H': code = KeyCodeHome;     break;
+        case 'K': code = KeyCodeShiftEnd; break;
+      }
+    }
+    else if (size == 4) {
+      if (keys[2] == '4' && keys[3] == '~') {
+        code = KeyCodeEnd;
+      }
+      else if (keys[2] == '2' && keys[3] == 'J') {
+        code = KeyCodeShiftHome;
+      }
+    }
+    else if (size == 6 && keys[2] == '1' && keys[3] == ';') {
+      if (keys[4] == '2') {
+        switch (keys[5]) {
+          case 'D': code = KeyCodeShiftLeft;  break;
+          case 'C': code = KeyCodeShiftRight; break;
+          case 'A': code = KeyCodeShiftUp;    break;
+          case 'B': code = KeyCodeShiftDown;  break;
+        }
+      }
+      else if (keys[4] == '5') {
+        switch (keys[5]) {
+          case 'D': code = KeyCodeCtrlLeft;  break;
+          case 'C': code = KeyCodeCtrlRight; break;
+          case 'A': code = KeyCodeCtrlUp;    break;
+          case 'B': code = KeyCodeCtrlDown;  break;
+        }
+      }
+    }
+  }
+  else if (keys[0] != KeyCodeEscape) {
+    code = keys[0];
+  }
+
+  return code;
+}
+
+//--------------------------------------------------------------------------------------------------
+
 static void window_resize_handler(int signal) {
   debug_print("Window resize\r\n");
 }
@@ -372,6 +463,17 @@ static void editor_init() {
 int main() {
   terminal_init();
   editor_init();
+
+  while (1) {
+    int code = get_input();
+
+    if (code == KeyCodeCtrlC) {
+      exit(0);
+    }
+    if (code == KeyCodeNone) continue;
+
+    debug_print("Code: %d\n", code);
+  }
 
   File* file = open_file("array.h", sizeof("array.h") - 1);
   if (!file) {

@@ -1,5 +1,8 @@
 {
   "files.associations": {
-    "atomic": "c"
+    "ranges": "c",
+    "array": "c",
+    "string": "c",
+    "string_view": "c"
   }
 }

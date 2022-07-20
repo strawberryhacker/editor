@@ -44,14 +44,18 @@ define_array(window_array, WindowArray, Window* );
 
 enum {
   KeyCodeCtrlC          = 3,
+  KeyCodeTab            = 9,
+  KeyCodeEnter          = 10,
   KeyCodeEscape         = 27,
 
   KeyCodePrintableStart = 32,
   KeyCodePrintableEnd   = 126,
+  KeyCodeDelete         = 127,
 
   KeyCodeAsciiEnd       = 255,
-  KeyCodeUnknown        = 256,
-  KeyCodeNone           = 257,
+
+  KeyCodeUnknown,
+  KeyCodeNone,
 
   KeyCodeUp,
   KeyCodeDown,
@@ -127,39 +131,13 @@ static int focused_window;
 static int editor_width;
 static int editor_height;
 
+static int previous_keycode;
+
 //--------------------------------------------------------------------------------------------------
 
-// Forward declarations.
-
-static void debug_print(const char* data, ...);
-
-static int print(const char* data, ...);
-static void flush();
-static void get_cursor(int* x, int* y);
-static void set_cursor(int x, int y);
-static void get_terminal_size(int* width, int* height);
-static void hide_cursor();
-static void show_cursor();
-static void clear_line(int y);
-static void clear_terminal();
-
-static File* new_file(char* path, int path_size);
-static void delete_file(File* file);
-static File* open_file(char* path, int path_size);
-static File* create_file(char* path, int path_size);
-static bool save_file(File* file);
-
-static Line* append_line(File* file);
 static void delete_line(Line* line);
-
+static Line* append_line(File* file);
 static void append_chars(Line* line, char* data, int size);
-
-static int get_input();
-
-static void window_resize_handler(int signal);
-static void terminal_deinit();
-static void terminal_init();
-static void editor_init();
 
 //--------------------------------------------------------------------------------------------------
 
@@ -432,6 +410,15 @@ static Line* append_line(File* file) {
 
 //--------------------------------------------------------------------------------------------------
 
+static Line* insert_line(File* file, int offset) {
+  Line* line = calloc(1, sizeof(Line));
+  line_array_insert(&file->lines, line, offset);
+  file->dirty = true;
+  return line;
+}
+
+//--------------------------------------------------------------------------------------------------
+
 static void delete_line(Line* line) {
   char_array_delete(&line->chars);
   free(line);
@@ -441,6 +428,20 @@ static void delete_line(Line* line) {
 
 static void append_chars(Line* line, char* data, int size) {
   char_array_append_multiple(&line->chars, data, size);
+  line->dirty = true;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void append_char(Line* line, char c) {
+  char_array_append(&line->chars, c);
+  line->dirty = true;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void delete_char(Line* line, int index) {
+  char_array_remove(&line->chars, index);
   line->dirty = true;
 }
 
@@ -540,6 +541,103 @@ static void update_window_cursor_y(Window* window, int y) {
 
 //--------------------------------------------------------------------------------------------------
 
+static int get_leading_spaces(Line* line) {
+  int i;
+  for (i = 0; i < line->chars.count && line->chars.items[i] == ' '; i++);
+  return i;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static char get_last_char(Line* line) {
+  return line->chars.count ? line->chars.items[line->chars.count - 1] : 0;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void append_spaces(Line* line, int count) {
+  while (count--) {
+    append_char(line, ' ');
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void file_insert_chars(Window* window, char* data, int size) {
+  static CharArray buffer = {0};
+
+  Line* line = window->file->lines.items[window->cursor_y];
+
+  char_array_clear(&buffer);
+  char_array_append_multiple(&buffer, &line->chars.items[window->cursor_x], line->chars.count - window->cursor_x);
+  line->chars.count = window->cursor_x;
+
+  for (int i = 0; i < size; i++) {
+    if (data[i] == '\n') {
+      window->cursor_x = 0;
+      window->cursor_y++;
+      line = insert_line(window->file, window->cursor_y);
+    }
+    else {
+      window->cursor_x++;
+      append_char(line, data[i]);
+    }
+  }
+
+  // Smart indentation.
+  if (size == 1 && data[0] == '\n') {
+    Line* previous_line = window->file->lines.items[window->cursor_y - 1];
+    int spaces = get_leading_spaces(previous_line);
+
+    if (get_last_char(previous_line) == '{') {
+      if (previous_keycode == '{') {
+        Line* next_line = insert_line(window->file, window->cursor_y + 1);
+        append_spaces(next_line, spaces);
+        append_char(next_line, '}');
+      }
+
+      spaces += SpacesPerTab;
+    }
+
+    append_spaces(line, spaces);
+    window->cursor_x = line->chars.count;
+  }
+
+  debug_print("Line: %d\n", buffer.count);
+  append_chars(line, buffer.items, buffer.count);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void file_insert_char(Window* window, char c) {
+  file_insert_chars(window, &c, 1);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void file_delete_char(Window* window) {
+  Line* current = window->file->lines.items[window->cursor_y];
+
+  if (window->cursor_x) {
+    delete_char(current, window->cursor_x - 1);
+    update_window_cursor_x(window, window->cursor_x - 1);
+  }
+  else if (window->cursor_y) {
+    Line* previous = window->file->lines.items[window->cursor_y - 1];
+
+    update_window_cursor_x(window, previous->chars.count);
+    append_chars(previous, current->chars.items, current->chars.count);
+
+    line_array_remove(&window->file->lines, window->cursor_y);
+    update_window_cursor_y(window, window->cursor_y - 1);
+
+    window->file->dirty = true;
+    window->moved = true;
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+
 static void editor_handle_keypress(Window* window, int keycode) {
   switch (keycode) {
     case KeyCodeUp:
@@ -566,8 +664,40 @@ static void editor_handle_keypress(Window* window, int keycode) {
       update_window_cursor_x(window, window->file->lines.items[window->cursor_y]->chars.count);
       break;
     
-    default: 
-      debug_print("Unhandled window keycode: %d\n", keycode);
+    case KeyCodeDelete: {
+      int delete_count = 1;
+      int space_count = get_leading_spaces(window->file->lines.items[window->cursor_y]);
+
+      if (window->cursor_x <= space_count) {
+        space_count = min(space_count, window->cursor_x);
+        if (space_count % SpacesPerTab == 0 && space_count) {
+          delete_count++;
+        }
+      }
+
+      while (delete_count--) {
+        file_delete_char(window);
+      }
+      break;
+    }
+
+    case KeyCodeTab:
+      for (int i = 0; i < SpacesPerTab; i++) {
+        file_insert_char(window, ' ');
+      }
+      break;
+
+    case KeyCodeEnter:
+      file_insert_char(window, '\n');
+      break;
+    
+    default:
+      if (KeyCodePrintableStart <= keycode && keycode <= KeyCodePrintableEnd) {
+        file_insert_char(window, keycode);
+      }
+      else {
+        debug_print("Unhandled window keycode: %d\n", keycode);
+      }
   }
 }
 
@@ -585,6 +715,7 @@ static void update() {
     if (keycode != KeyCodeNone) {
       Window* window = windows.items[focused_window];
       editor_handle_keypress(window, keycode);
+      previous_keycode = keycode;
       break;
     }
   }

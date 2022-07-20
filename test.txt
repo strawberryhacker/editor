@@ -122,12 +122,6 @@ static FileArray files;
 
 static bool running = true;
 static int focused_window;
-static int editor_width;
-static int editor_height;
-
-// Try to not segfault if event happen in render.
-static int new_editor_width;
-static int new_editor_height;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -231,12 +225,6 @@ static void set_cursor(int x, int y) {
 
 //--------------------------------------------------------------------------------------------------
 
-static void set_window_cursor(Window* window, int x, int y) {
-  set_cursor(window->position_x + x, window->position_y + y);
-}
-
-//--------------------------------------------------------------------------------------------------
-
 static void get_terminal_size(int* width, int* height) {
   int x, y;
   get_cursor(&x, &y);
@@ -273,60 +261,6 @@ static void clear_line(int y) {
 
 static void clear_terminal() {
   print("\x1b[2J");
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static int get_input() {
-  char keys[64];
-  int size = read(STDIN_FILENO, keys, sizeof(keys));
-  if (!size) return KeyCodeNone;
-
-  int code = KeyCodeNone;
-
-  if (size >= 3 && keys[0] == '\x1b' && keys[1] == '[') {
-    if (size == 3) {
-      switch (keys[2]) {
-        case 'A': code = KeyCodeUp;       break;
-        case 'B': code = KeyCodeDown;     break;
-        case 'D': code = KeyCodeLeft;     break;
-        case 'C': code = KeyCodeRight;    break;
-        case 'H': code = KeyCodeHome;     break;
-        case 'K': code = KeyCodeShiftEnd; break;
-      }
-    }
-    else if (size == 4) {
-      if (keys[2] == '4' && keys[3] == '~') {
-        code = KeyCodeEnd;
-      }
-      else if (keys[2] == '2' && keys[3] == 'J') {
-        code = KeyCodeShiftHome;
-      }
-    }
-    else if (size == 6 && keys[2] == '1' && keys[3] == ';') {
-      if (keys[4] == '2') {
-        switch (keys[5]) {
-          case 'A': code = KeyCodeShiftUp;    break;
-          case 'B': code = KeyCodeShiftDown;  break;
-          case 'D': code = KeyCodeShiftLeft;  break;
-          case 'C': code = KeyCodeShiftRight; break;
-        }
-      }
-      else if (keys[4] == '5') {
-        switch (keys[5]) {
-          case 'A': code = KeyCodeCtrlUp;    break;
-          case 'B': code = KeyCodeCtrlDown;  break;
-          case 'D': code = KeyCodeCtrlLeft;  break;
-          case 'C': code = KeyCodeCtrlRight; break;
-        }
-      }
-    }
-  }
-  else if (keys[0] != KeyCodeEscape) {
-    code = keys[0];
-  }
-
-  return code;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -448,6 +382,12 @@ static void append_chars(Line* line, char* data, int size) {
 
 //--------------------------------------------------------------------------------------------------
 
+static void render() {
+  debug_print("Frame\n");
+}
+
+//--------------------------------------------------------------------------------------------------
+
 static int count_digits(int number) {
   int digits = 0;
 
@@ -470,14 +410,6 @@ static int get_left_padding(Window* window) {
 static void get_active_size(Window* window, int* width, int* height) {
   *width  = window->width - get_left_padding(window);
   *height = window->height - StatusBarCount;
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static int get_visible_line_count(Window* window) {
-  int width, height;
-  get_active_size(window, &width, &height);
-  return min(height, window->file->lines.count - window->offset_y);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -526,18 +458,16 @@ static void limit_window_cursor(Window* window) {
 
 //--------------------------------------------------------------------------------------------------
 
-static void update_window_cursor_x(Window* window, int x) {
-  window->cursor_x = x;
-  window->ideal_cursor_x = x;
-  limit_window_cursor(window);
+static void update_y_cursor(Window* window, int y) {
+  window->cursor_y = y;
+  window->cursor_x = window->ideal_cursor_x;
 }
 
 //--------------------------------------------------------------------------------------------------
 
-static void update_window_cursor_y(Window* window, int y) {
-  window->cursor_y = y;
-  window->cursor_x = window->ideal_cursor_x;
-  limit_window_cursor(window);
+static void update_x_cursor(Window* window, int x) {
+  window->cursor_x = x;
+  window->ideal_cursor_x = x;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -545,19 +475,19 @@ static void update_window_cursor_y(Window* window, int y) {
 static void editor_handle_keypress(Window* window, int keycode) {
   switch (keycode) {
     case KeyCodeUp:
-      update_window_cursor_y(window, window->cursor_y - 1);
+      update_y_cursor(window, window->cursor_y - 1);
       break;
 
     case KeyCodeDown:
-      update_window_cursor_y(window, window->cursor_y + 1);
+      update_y_cursor(window, window->cursor_y + 1);
       break;
 
     case KeyCodeLeft:
-      update_window_cursor_x(window, window->cursor_x - 1);
+      update_x_cursor(window, window->cursor_x - 1);
       break;
 
     case KeyCodeRight:
-      update_window_cursor_x(window, window->cursor_x + 1);
+      update_x_cursor(window, window->cursor_x + 1);
       break;
     
     default: 
@@ -568,109 +498,69 @@ static void editor_handle_keypress(Window* window, int keycode) {
 //--------------------------------------------------------------------------------------------------
 
 static void update() {
-  while (1) {
-    int keycode = get_input();
+  int keycode = get_input();
 
-    if (keycode == KeyCodeCtrlC) {
-      running = false;
-      return;
-    }
-
-    if (keycode != KeyCodeNone) {
-      Window* window = windows.items[focused_window];
-      editor_handle_keypress(window, keycode);
-      break;
-    }
-  }
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void render_status_bar(Window* window) {
-  // Hmm...
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void render() {
-  static bool redraw[1024];
-  memset(redraw, 0, editor_height);
-
-  for (int i = 0; i < windows.count; i++) {
-    update_window_offsets(windows.items[i]);
-  }
-
-  // Mark lines for redraw.
-  for (int i = 0; i < windows.count; i++) {
-    Window* window = windows.items[i];
-
-    // Redraw entire occupied region if either the window is moved or the file is dirty.
-    if (window->file->dirty || window->moved) {
-      window->file->dirty = false;
-      window->moved = false;
-
-      for (int j = 0; j < window->height; j++) {
-        redraw[window->position_y + j] = true;
-      }
-    }
-
-    // Redraw dirty visible lines.
-    for (int j = 0; j < get_visible_line_count(window); j++) {
-      Line* line = window->file->lines.items[window->offset_y + j];
-
-      if (line->dirty) {
-        line->dirty = false;
-        redraw[window->position_y + j] = true;
-      }
-    }
-
-    // Redraw status bars.
-    for (int j = 0; j < StatusBarCount; j++) {
-      redraw[window->position_y + window->height - j - 1] = true;
-    }
-  }
-
-  // Clear lines to be redrawn.
-  for (int i = 0; i < editor_height; i++) {
-    if (redraw[i]) {
-      clear_line(i);
-    }
-  }
-
-  hide_cursor();
-  
-  // Render.
-  for (int i = 0; i < windows.count; i++) {
-    Window* window = windows.items[i];
-
-    int width, height;
-    get_active_size(window, &width, &height);
-
-    int number_width = count_digits(window->file->lines.count);
-
-    for (int j = 0; j < get_visible_line_count(window); j++) {
-      if (!redraw[window->position_y + j]) continue;
-
-      Line* line = window->file->lines.items[window->offset_y + j];
-
-      set_window_cursor(window, 0, j);
-
-      print("%*d", number_width, window->position_y + j);
-      print("%*c", LinenumberMargin, ' ');
-      print("%.*s", max(min(line->chars.count - window->offset_x, width), 0), &line->chars.items[window->offset_x]);
-    }
-
-    render_status_bar(window);
+  if (keycode == KeyCodeCtrlC) {
+    running = false;
   }
 
   Window* window = windows.items[focused_window];
 
-  int cursor_x = window->cursor_x - window->offset_x + get_left_padding(window);
-  int cursor_y = window->cursor_y - window->offset_y;
+  editor_handle_keypress(window, keycode);
+}
 
-  set_window_cursor(window, cursor_x, cursor_y);
-  show_cursor();
-  flush();
+//--------------------------------------------------------------------------------------------------
+
+static int get_input() {
+  char keys[64];
+  int size = read(STDIN_FILENO, keys, sizeof(keys));
+  if (!size) return KeyCodeNone;
+
+  int code = KeyCodeNone;
+
+  if (size >= 3 && keys[0] == '\x1b' && keys[1] == '[') {
+    if (size == 3) {
+      switch (keys[2]) {
+        case 'A': code = KeyCodeUp;       break;
+        case 'B': code = KeyCodeDown;     break;
+        case 'D': code = KeyCodeLeft;     break;
+        case 'C': code = KeyCodeRight;    break;
+        case 'H': code = KeyCodeHome;     break;
+        case 'K': code = KeyCodeShiftEnd; break;
+      }
+    }
+    else if (size == 4) {
+      if (keys[2] == '4' && keys[3] == '~') {
+        code = KeyCodeEnd;
+      }
+      else if (keys[2] == '2' && keys[3] == 'J') {
+        code = KeyCodeShiftHome;
+      }
+    }
+    else if (size == 6 && keys[2] == '1' && keys[3] == ';') {
+      if (keys[4] == '2') {
+        switch (keys[5]) {
+          case 'A': code = KeyCodeShiftUp;    break;
+          case 'B': code = KeyCodeShiftDown;  break;
+          case 'D': code = KeyCodeShiftLeft;  break;
+          case 'C': code = KeyCodeShiftRight; break;
+        }
+      }
+      else if (keys[4] == '5') {
+        switch (keys[5]) {
+          case 'A': code = KeyCodeCtrlUp;    break;
+          case 'B': code = KeyCodeCtrlDown;  break;
+          case 'D': code = KeyCodeCtrlLeft;  break;
+          case 'C': code = KeyCodeCtrlRight; break;
+        }
+      }
+    }
+  }
+  else if (keys[0] != KeyCodeEscape) {
+    code = keys[0];
+  }
+
+  return code;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -718,23 +608,13 @@ int main() {
   terminal_init();
   editor_init();
 
+  Window* window = calloc(1, sizeof(Window));
+  window->file = open_file("")
+
   int width, height;
   get_terminal_size(&width, &height);
 
-  char test_file[] = "test.txt";
-  Window* window = calloc(1, sizeof(Window));
-  window->file = open_file(test_file, sizeof(test_file) - 1);
-
-  window->moved = true;
-
-  window->width = width;
-  window->height = height;
-
-  editor_width = width;
-  editor_height = height;
-
-  window_array_append(&windows, window);
-  focused_window = 0;
+  debug_print("width = %d height = %d\n", width, height);
 
   while (running) {
     render();

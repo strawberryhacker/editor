@@ -36,6 +36,14 @@ static inline void name##_extend(ArrayType* array, int size) {                  
   }                                                                                                                \
 }                                                                                                                  \
                                                                                                                    \
+static inline void name##_delete(ArrayType* array) {                                                               \
+  if (array->capacity) {                                                                                           \
+    free(array->items);                                                                                            \
+  }                                                                                                                \
+  array->capacity = 0;                                                                                             \
+  array->count = 0;                                                                                                \
+}                                                                                                                  \
+                                                                                                                   \
 static inline void name##_clear(ArrayType* array) {                                                                \
   array->count = 0;                                                                                                \
 }                                                                                                                  \

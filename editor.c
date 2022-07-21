@@ -119,18 +119,9 @@ enum {
 
 //--------------------------------------------------------------------------------------------------
 
-enum {
-  ResizeRegionUp,
-  ResizeRegionDown,
-  ResizeRegionLeft,
-  ResizeRegionRight,
-};
-
-//--------------------------------------------------------------------------------------------------
-
 struct Line {
   CharArray chars;
-
+  CharArray colors;
   bool dirty;
 };
 
@@ -139,7 +130,6 @@ struct Line {
 struct File {
   CharArray path;
   LineArray lines;
-
   bool unsaved;
   bool dirty;
 };
@@ -227,6 +217,8 @@ static void resize(Region* region, int amount);
 static void remove_window(Window* window);
 static void swap_windows(Window* window);
 static void focus_next();
+static void render_line(Line* line);
+static void focus_previous();
 
 //--------------------------------------------------------------------------------------------------
 
@@ -594,6 +586,7 @@ static void delete_line(Line* line) {
 static void append_chars(Line* line, char* data, int size) {
   char_array_append_multiple(&line->chars, data, size);
   line->dirty = true;
+  render_line(line);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -601,6 +594,7 @@ static void append_chars(Line* line, char* data, int size) {
 static void append_char(Line* line, char c) {
   char_array_append(&line->chars, c);
   line->dirty = true;
+  render_line(line);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -608,6 +602,34 @@ static void append_char(Line* line, char c) {
 static void delete_char(Line* line, int index) {
   char_array_remove(&line->chars, index);
   line->dirty = true;
+  render_line(line);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void render_line(Line* line) {
+  char_array_extend(&line->colors, line->chars.count);
+
+  char* data = line->chars.items;
+  int size = line->chars.count;
+  char prev = 0;
+  bool comment = false;
+
+  for (int i = 0; i < size; i++) {
+    if (data[i] == '/' && prev == '/') {
+      line->colors.items[i - 1] = 31;
+      comment = true;
+    }
+
+    if (comment) {
+      line->colors.items[i] = 31;
+    }
+    else {
+      line->colors.items[i] = 0;
+    }
+
+    prev = data[i];
+  }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -753,6 +775,7 @@ static void file_insert_chars(Window* window, char* data, int size) {
     if (data[i] == '\n') {
       window->cursor_x = 0;
       window->cursor_y++;
+      render_line(line);
       line = insert_line(window->file, window->cursor_y);
     }
     else {
@@ -760,6 +783,8 @@ static void file_insert_chars(Window* window, char* data, int size) {
       append_char(line, data[i]);
     }
   }
+
+  render_line(line);
 
   // Smart indentation.
   if (size == 1 && data[0] == '\n') {
@@ -929,7 +954,8 @@ static void editor_handle_keypress(Window* window, int keycode) {
       break;
 
     case UserKeyFocusPrevious:
-      if (--focused_window < 0) focused_window = windows.count - 1;
+      focus_previous();
+      //if (--focused_window < 0) focused_window = windows.count - 1;
       break;
 
     case UserKeyOpen:
@@ -1305,6 +1331,8 @@ static void render_window(Window* window) {
 
   int number_width = window->file ? count_digits(window->file->lines.count) : 1;
 
+  int color = 0;
+
   for (int j = 0; j < get_visible_line_count(window); j++) {
     if (!redraw_line[window->position_y + j]) continue;
 
@@ -1321,7 +1349,23 @@ static void render_window(Window* window) {
 
     print("%*d", number_width, window->offset_y + j);
     print("%*c", LinenumberMargin, ' ');
-    print("%.*s", max(min(line->chars.count - window->offset_x, width), 0), &line->chars.items[window->offset_x]);
+
+    int size = max(min(line->chars.count - window->offset_x, width), 0);
+
+    for (int i = 0; i < size; i++) {
+      int index = window->offset_x + i;
+
+      if (line->colors.items[index] != color) {
+        color = line->colors.items[index];
+        print("\x1b[%dm", color);
+      }
+
+      print("%c", line->chars.items[index]);
+    }
+
+    if (color) {
+      clear_formatting();
+    }
   }
 
   for (int j = get_visible_line_count(window); j < height; j++) {
@@ -1550,18 +1594,35 @@ static Region* recurse_left(Region* region) {
 
 //--------------------------------------------------------------------------------------------------
 
+static Region* recurse_right(Region* region) {
+  return region->childs[1] ? recurse_right(region->childs[1]) : region;
+}
+
+//--------------------------------------------------------------------------------------------------
+
 static Region* get_next_region(Region* region) {
   if (region->parent == 0) {
-    debug_print("recurse left\n");
     return recurse_left(region);
   }
   else if (region->parent->childs[0] == region) {
-    debug_print("recurse right\n");
     return recurse_left(region->parent->childs[1]);
   }
   else {
-    debug_print("recurse next\n");
     return get_next_region(region->parent);
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static Region* get_previous_region(Region* region) {
+  if (region->parent == 0) {
+    return recurse_right(region);
+  }
+  else if (region->parent->childs[1] == region) {
+    return recurse_right(region->parent->childs[0]);
+  }
+  else {
+    return get_previous_region(region->parent);
   }
 }
 
@@ -1571,6 +1632,26 @@ static void focus_next() {
   Window* window = windows.items[focused_window];
 
   Region* region = get_next_region(window->region);
+  window = region->window;
+
+  debug_print("Window: %p\n", window);
+  debug_print("Window: %p\n", region->childs[0]);
+  debug_print("Window: %p\n", region->childs[1]);
+
+  for (int i = 0; i < windows.count; i++) {
+    if (window == windows.items[i]) {
+      focused_window = i;
+      return;
+    }
+  }
+
+  assert(0);
+}
+
+static void focus_previous() {
+  Window* window = windows.items[focused_window];
+
+  Region* region = get_previous_region(window->region);
   window = region->window;
 
   debug_print("Window: %p\n", window);

@@ -22,6 +22,9 @@
 #define BarCursorMarginRight       5
 #define LinenumberMargin           2
 #define StatusBarCount             1
+#define ErrorShowTime              1500
+#define MinimumWindowWidth         40
+#define MinimumWindowHeight        10
 
 //--------------------------------------------------------------------------------------------------
 
@@ -31,9 +34,9 @@
 //--------------------------------------------------------------------------------------------------
 
 typedef struct termios Termios;
+typedef struct timeval Time;
 typedef struct Line Line;
 typedef struct File File;
-typedef struct Bar Bar;
 typedef struct Window Window;
 
 //--------------------------------------------------------------------------------------------------
@@ -55,6 +58,7 @@ enum {
   KeyCodeCtrlC          = 3,
   KeyCodeCtrlG          = 7,
   KeyCodeCtrlN          = 14,
+  KeyCodeCtrlQ          = 17,
   KeyCodeCtrlS          = 19,
 
   KeyCodePrintableStart = 32,
@@ -89,6 +93,8 @@ enum {
 
 enum {
   BarTypeOpen,
+  BarTypeNew,
+  BarTypeCommand,
   BarTypeCount,
 };
 
@@ -97,10 +103,13 @@ enum {
 enum {
   UserKeyFocusNext     = KeyCodeShiftRight,
   UserKeyFocusPrevious = KeyCodeShiftLeft,
-  UserKeyExit          = KeyCodeCtrlC,
+  UserKeyPageUp        = KeyCodeShiftUp,
+  UserKeyPageDown      = KeyCodeShiftDown,
+  UserKeyExit          = KeyCodeCtrlQ,
   UserKeyOpen          = KeyCodeCtrlG,
   UserKeyNew           = KeyCodeCtrlN,
   UserKeySave          = KeyCodeCtrlS,
+  UserKeyCommand       = KeyCodeCtrlC,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -123,16 +132,6 @@ struct File {
 
 //--------------------------------------------------------------------------------------------------
 
-struct Bar {
-  int type;
-  int cursor;
-  int offset;
-  bool focused;
-  CharArray chars;
-};
-
-//--------------------------------------------------------------------------------------------------
-
 struct Window {
   File* file;
 
@@ -150,7 +149,16 @@ struct Window {
   int ideal_cursor_x;
 
   bool redraw;
-  Bar bar;
+
+  int bar_type;
+  int bar_cursor;
+  int bar_offset;
+  bool bar_focused;
+  CharArray bar_chars;
+
+  Time error_time;
+  bool error_active;
+  CharArray error_message;
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -161,7 +169,9 @@ static WindowArray windows;
 static FileArray files;
 
 static char* bar_message[BarTypeCount] = {
-  [BarTypeOpen] = " open: ",
+  [BarTypeOpen]    = " open: ",
+  [BarTypeNew]     = " new: ",
+  [BarTypeCommand] = " command: "
 };
 
 static bool redraw_line[1024];
@@ -298,9 +308,9 @@ static int get_input() {
   int size = read(STDIN_FILENO, keys, sizeof(keys));
   if (!size) return KeyCodeNone;
 
-  int code = KeyCodeNone;
+  int code = keys[0];
 
-  if (size >= 3 && keys[0] == '\x1b' && keys[1] == '[') {
+  if (code == '\x1b' && size > 2 && keys[1] == '[') {
     if (size == 3) {
       switch (keys[2]) {
         case 'A': code = KeyCodeUp;       break;
@@ -338,14 +348,40 @@ static int get_input() {
       }
     }
   }
-  else if (keys[0] != KeyCodeEscape) {
-    code = keys[0];
-  }
-  else if (keys[0] == KeyCodeEscape && size == 1) {
-    code = KeyCodeEscape;
+  else if (code == '\x1b' && size > 1) {
+    code = KeyCodeNone;
   }
 
   return code;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void get_time(Time* time) {
+  gettimeofday(time, NULL);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static int get_elapsed(Time* start, Time* end) {
+  return (end->tv_sec * 1000LL + end->tv_usec / 1000) - (start->tv_sec * 1000LL + start->tv_usec / 1000);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void error(Window* window, char* message, ...) {
+  char_array_clear(&window->error_message);
+  char_array_extend(&window->error_message, 1024);
+
+  va_list arguments;
+  va_start(arguments, message);
+  int size = vsnprintf(window->error_message.items, 1024, message, arguments);
+  va_end(arguments);
+
+  window->error_message.count = size;
+
+  window->error_active = true;
+  get_time(&window->error_time);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -358,6 +394,14 @@ static File* new_file(char* path, int path_size) {
   file->dirty = true;
 
   return file;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static int get_window(Window* window) {
+  for (int i = 0; i < windows.count; i++) {
+    if (window == windows.items[i]) return i;
+  }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -377,6 +421,7 @@ static File* open_file(char* path, int path_size) {
 
     File* file = files.items[i];
     if (path_size == file->path.count && !memcmp(path, file->path.items, path_size)) {
+      debug_print("Path exist\n");
       return file;
     }
   }
@@ -460,6 +505,8 @@ static bool save_file(File* file) {
 
   close(fd);
 
+  return false;
+
   file->unsaved = false;
   return true;
 }
@@ -526,13 +573,13 @@ static int count_digits(int number) {
 //--------------------------------------------------------------------------------------------------
 
 static int get_left_padding(Window* window) {
-  return count_digits(window->file->lines.count) + LinenumberMargin;
+  return 1+count_digits(window->file->lines.count) + LinenumberMargin;
 }
 
 //--------------------------------------------------------------------------------------------------
 
 static int get_left_bar_padding(Window* window) {
-  return strlen(bar_message[window->bar.type]);
+  return strlen(bar_message[window->bar_type]);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -709,6 +756,14 @@ static void file_delete_char(Window* window) {
 
 //--------------------------------------------------------------------------------------------------
 
+static void enter_bar_mode(Window* window, int type) {
+  window->bar_focused = true;
+  window->bar_type = type;
+  window->error_active = false;
+}
+
+//--------------------------------------------------------------------------------------------------
+
 static void editor_handle_keypress(Window* window, int keycode) {
   if (KeyCodePrintableStart <= keycode && keycode <= KeyCodePrintableEnd) {
     file_insert_char(window, keycode);
@@ -721,6 +776,24 @@ static void editor_handle_keypress(Window* window, int keycode) {
 
     case KeyCodeDown:
       update_window_cursor_y(window, window->cursor_y + 1);
+      break;
+
+    case UserKeyPageUp:
+      update_window_cursor_y(window, window->cursor_y - window->height / 2);
+      break;
+
+    case UserKeyPageDown:
+      update_window_cursor_y(window, window->cursor_y + window->height / 2);
+      break;
+
+    case KeyCodeShiftHome:
+      update_window_cursor_x(window, 0);
+      update_window_cursor_y(window, 0);
+      break;
+
+    case KeyCodeShiftEnd:
+      update_window_cursor_x(window, window->file->lines.items[window->file->lines.count - 1]->chars.count);
+      update_window_cursor_y(window, window->file->lines.count - 1);
       break;
 
     case KeyCodeLeft:
@@ -779,13 +852,24 @@ static void editor_handle_keypress(Window* window, int keycode) {
       break;
 
     case UserKeyOpen:
-      window->bar.focused = true;
-      window->bar.type = BarTypeOpen;
+      enter_bar_mode(window, BarTypeOpen);
+      break;
+
+    case UserKeyNew:
+      enter_bar_mode(window, BarTypeNew);
+      break;
+
+    case UserKeyCommand:
+      enter_bar_mode(window, BarTypeCommand);
+      break;
+
+    case KeyCodeEscape:
+      window->error_active = false;
       break;
     
     case UserKeySave:
       if (!save_file(window->file)) {
-        debug_print("Cant save file\n");
+        error(window, "can not save file `%.*s`", window->file->path.count, window->file->path.items);
       }
       break;
 
@@ -809,71 +893,218 @@ static void change_file(Window* window, File* file) {
 
 //--------------------------------------------------------------------------------------------------
 
-static void handle_bar_command(Window* window) {
-  Bar* bar = &window->bar;
-  debug_print("Got command: %.*s\n", bar->chars.count, bar->chars.items);
+static void skip_spaces(char** data) {
+  char* tmp = *data;
 
-  switch (bar->type) {
+  while (*tmp == ' ') {
+    tmp++;
+  }
+
+  *data = tmp;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static bool skip_keyword(char** data, char* keyword) {
+  skip_spaces(data);
+
+  int size = strlen(keyword);
+
+  if (!strncmp(*data, keyword, size)) {
+    *data += size;
+    return true;
+  }
+
+  return false;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static bool skip_char(char** data, char c) {
+  skip_spaces(data);
+  
+  if (**data == c) {
+    *data += 1;
+    return true;
+  }
+  
+  return false;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static bool read_number(char** data, int* number) {
+  skip_spaces(data);
+
+  char* end;
+  int value = strtol(*data, &end, 10);
+
+  int size = end - *data;
+  *data += size;
+
+  if (size) {
+    *number = value;
+    return true;
+  }
+
+  return false;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void vsplit(Window* window) {
+  int new_height = window->height / 2;
+
+  debug_print("height: %d new height: %d left: %d\n", window->height, new_height, window->height - new_height);
+
+  if ((window->height - new_height) < MinimumWindowHeight) {
+    error(window, "can't resize window");
+    return;
+  }
+
+  window->height -= new_height;
+
+  Window* new = calloc(1, sizeof(Window));
+
+  new->width = window->width;
+  new->height = new_height;
+  new->position_x = window->position_x;
+  new->position_y = window->position_y + window->height;
+  new->file = window->file;
+
+  new->redraw = true;
+  window->redraw = true;
+
+  window_array_append(&windows, new);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void handle_command(Window* window) {
+  // Add null termination.
+  char_array_append(&window->bar_chars, 0);
+  window->bar_chars.count--;
+
+  char* command = window->bar_chars.items;
+
+  if (skip_keyword(&command, "vsplit")) {
+    vsplit(window);
+  }
+  else if (skip_keyword(&command, "hsplit")) {
+  }
+  else if (skip_keyword(&command, "adjust")) {
+    int adjust = 0;
+    char direction = '-';
+
+    if (!read_number(&command, &adjust)) {
+      error(window, "missing value");
+    }
+
+    if (skip_char(&command, '<')) {
+      direction = '<';
+    }
+    else if (skip_char(&command, '>')) {
+      direction = '>';
+    }
+    else {
+      error(window, "give a direction < >");
+    }
+
+    debug_print("Adjusting %i to %c\n", adjust, direction);
+  }
+  else if (skip_keyword(&command, "close")) {
+    
+  }
+  else {
+    error(window, "unknow command `%.*s`", window->bar_chars.count, window->bar_chars.items);
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void bar_handle_enter(Window* window) {
+  debug_print("Got command: %.*s\n", window->bar_chars.count, window->bar_chars.items);
+
+  char* data = window->bar_chars.items;
+  int size = window->bar_chars.count;
+
+  switch (window->bar_type) {
     case BarTypeOpen: {
-      File* file = open_file(bar->chars.items, bar->chars.count);
+      File* file = open_file(window->bar_chars.items, window->bar_chars.count);
       
       if (file) {
         change_file(window, file);
       }
       else {
-        debug_print("Cant open file\n");
+        error(window, "can not open file `%.*s`", size, data);
       }
       break;
     }
+
+    case BarTypeNew:
+      File* file = create_file(window->bar_chars.items, window->bar_chars.count);
+      change_file(window, file);
+      break;
+
+    case BarTypeCommand:
+      handle_command(window);
+      break;
 
     default:
       debug_print("Unhandled bar type\n");
   }
 
   // More error handling is needed.
-  char_array_clear(&bar->chars);
+  char_array_clear(&window->bar_chars);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void exit_bar_view(Window* window) {
+  window->bar_focused = 0;
+  window->bar_cursor = 0;
+  window->bar_chars.count = 0;
+  window->bar_offset = 0;
 }
 
 //--------------------------------------------------------------------------------------------------
 
 static void bar_handle_keypress(Window* window, int keycode) {
-  Bar* bar = &window->bar;
-
   if (KeyCodePrintableStart <= keycode && keycode <= KeyCodePrintableEnd) {
-    char_array_insert(&bar->chars, keycode, bar->cursor++);
+    char_array_insert(&window->bar_chars, keycode, window->bar_cursor++);
   }
   else switch (keycode) {
     case KeyCodeEscape:
-      bar->focused = false;
+      exit_bar_view(window);
       break;
 
     case KeyCodeLeft:
-      bar->cursor = max(bar->cursor - 1, 0);
+      window->bar_cursor = max(window->bar_cursor - 1, 0);
       break;
 
     case KeyCodeRight:
-      bar->cursor = min(bar->cursor + 1, bar->chars.count);
+      window->bar_cursor = min(window->bar_cursor + 1, window->bar_chars.count);
       break;
 
     case KeyCodeHome:
-      bar->cursor = 0;
+      window->bar_cursor = 0;
       break;
 
     case KeyCodeEnd:
-      bar->cursor = bar->chars.count;
+      window->bar_cursor = window->bar_chars.count;
       break;
     
     case KeyCodeCapsDelete:
     case KeyCodeDelete:
-      if (bar->cursor) {
-        char_array_remove(&bar->chars, bar->cursor - 1);
-        bar->cursor--;
+      if (window->bar_cursor) {
+        char_array_remove(&window->bar_chars, window->bar_cursor - 1);
+        window->bar_cursor--;
       }
       break;
 
     case KeyCodeEnter:
-      handle_bar_command(window);
-      bar->focused = false;
+      bar_handle_enter(window);
+      exit_bar_view(window);
       break;
     
     default:
@@ -885,6 +1116,20 @@ static void bar_handle_keypress(Window* window, int keycode) {
 
 static void update() {
   while (1) {
+    bool done = false;
+    // Process expired error messages.
+    for (int i = 0; i < windows.count; i++) {
+      Window* window = windows.items[i];
+      if (window->error_active) {
+        Time now;
+        get_time(&now);
+        if (get_elapsed(&window->error_time, &now) > ErrorShowTime) {
+          window->error_active = false;
+          done = true;
+        }
+      }
+    }
+
     int keycode = get_input();
 
     if (keycode == UserKeyExit) {
@@ -895,7 +1140,7 @@ static void update() {
     if (keycode != KeyCodeNone) {
       Window* window = windows.items[focused_window];
 
-      if (window->bar.focused) {
+      if (window->bar_focused) {
         bar_handle_keypress(window, keycode);
       }
       else {
@@ -905,43 +1150,53 @@ static void update() {
 
       break;
     }
+
+    if (done) {
+      break;
+    }
   }
 }
 
 //--------------------------------------------------------------------------------------------------
 
 static void render_status_bar(Window* window) {
-  const char* active_string = "active ";
-
-  bool focus = (window == windows.items[focused_window]); // Todo: Improve.
-
-  int percent = 100 * window->cursor_y / window->file->lines.count;
-  int active_width = focus ? sizeof(active_string) - 1 : 0;
-  int left_size = active_width + 1 + window->file->path.count + 1 + count_digits(percent) + 1 + 1;
-  if (window->file->unsaved) {
-    left_size++;
-  }
-
-  int width_left = window->width - left_size;
-
-  Bar* bar = &window->bar;
+  bool window_focus = window == windows.items[focused_window];
+  int width = window->width;
 
   set_window_cursor(window, 0, window->height - 1);
 
-  if (bar->focused) {
-    width_left -= print("%s", bar_message[bar->type]);
-    width_left -= 1; // Padding.
+  if (window->error_active || window->bar_focused) {
+    if (window->error_active) {
+      print("\x1b[31m"); // Red.
 
-    bar->offset = get_updated_offset(bar->cursor, bar->offset, width_left, BarCursorMarginLeft, BarCursorMarginRight);
-    int bar_size = min(bar->chars.count - bar->offset ,width_left);
+      width -= print(" error: ");
+      width -= print("%.*s", min(window->error_message.count, width), window->error_message.items);  
 
-    width_left -= print("%.*s", bar_size, &bar->chars.items[bar->offset]);
+      print("\x1b[0m");
+    }
+    else if (window->bar_focused) {
+      width -= print("%s", bar_message[window->bar_type]) - 1;
+      width -= 1;
+
+      window->bar_offset = get_updated_offset(window->bar_cursor, window->bar_offset, width, BarCursorMarginLeft, BarCursorMarginRight);
+      int bar_size = min(window->bar_chars.count - window->bar_offset, width);
+
+      width -= print("%.*s", bar_size, &window->bar_chars.items[window->bar_offset]);
+    }
   }
+  else {
+    int percent = 100 * window->cursor_y / window->file->lines.count;
+    int size = window->file->path.count + 1 + count_digits(percent) + sizeof((char)'%') + 1;
 
-  set_window_cursor(window, window->width - left_size, window->height - 1);
-  if (focus) print("%s", active_string);
-  if (window->file->unsaved) print("*");
-  print("%.*s %d%% ", window->file->path.count, window->file->path.items, percent);
+    print("\x1b[100m\x1b[37m");
+
+    for (int i = 0; i < width - size; i++) {
+      print(" ");
+    }
+
+    print("%.*s %d%% ", window->file->path.count, window->file->path.items, percent);
+    print("\x1b[0m");
+  }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -959,7 +1214,9 @@ static void render_window(Window* window) {
 
     set_window_cursor(window, 0, j);
 
-    print("%*d", number_width, window->position_y + j);
+    if (window->position_x) print("\x1b[100m \x1b[0m"); else print(" ");
+
+    print("%*d", number_width, window->offset_y + j);
     print("%*c", LinenumberMargin, ' ');
     print("%.*s", max(min(line->chars.count - window->offset_x, width), 0), &line->chars.items[window->offset_x]);
   }
@@ -975,9 +1232,10 @@ static void mark_lines_for_redraw() {
   for (int i = 0; i < windows.count; i++) {
     Window* window = windows.items[i];
 
+    debug_print("Window %d: %p\n", i, window->file);
+
     // Redraw entire occupied region if either the window is moved or the file is dirty.
     if (window->file->dirty || window->redraw) {
-      window->file->dirty = false;
       window->redraw = false;
 
       for (int j = 0; j < window->height; j++) {
@@ -987,10 +1245,7 @@ static void mark_lines_for_redraw() {
 
     // Redraw dirty visible lines.
     for (int j = 0; j < get_visible_line_count(window); j++) {
-      Line* line = window->file->lines.items[window->offset_y + j];
-
-      if (line->dirty) {
-        line->dirty = false;
+      if (window->file->lines.items[window->offset_y + j]->dirty) {
         redraw_line[window->position_y + j] = true;
       }
     }
@@ -998,6 +1253,16 @@ static void mark_lines_for_redraw() {
     // Redraw status bars.
     for (int j = 0; j < StatusBarCount; j++) {
       redraw_line[window->position_y + window->height - j - 1] = true;
+    }
+  }
+
+  // Files are shared and must be marked clean after all checks are done.
+  for (int i = 0; i < windows.count; i++) {
+    Window* window = windows.items[i];
+    window->file->dirty = false;
+
+    for (int j = 0; j < get_visible_line_count(window); j++) {
+      window->file->lines.items[window->offset_y + j]->dirty = false;
     }
   }
 }
@@ -1028,8 +1293,8 @@ static void render() {
   int cursor_x;
   int cursor_y;
 
-  if (window->bar.focused) {
-    cursor_x = window->bar.cursor - window->bar.offset + get_left_bar_padding(window);
+  if (window->bar_focused) {
+    cursor_x = window->bar_cursor - window->bar_offset + get_left_bar_padding(window);
     cursor_y = window->height - 1;
     debug_print("cursor: %d\n", cursor_x);
   }
@@ -1047,6 +1312,8 @@ static void render() {
 
 static void window_resize_handler(int signal) {
   Window* window = windows.items[focused_window];
+
+  debug_print("Resize\n");
 
   for (int i = 0; i < windows.count; i++) {
     windows.items[i]->redraw = true;

@@ -93,7 +93,7 @@ struct Line {
 struct File {
   CharArray path;
   LineArray lines;
-
+aoeunthaoeutnaoenthaoeusntahoesunth
   bool unsaved;
   bool dirty;
 };
@@ -629,5 +629,3 @@ int main() {
   }
 
   debug_print("Quit\n");
-
-  return 0;

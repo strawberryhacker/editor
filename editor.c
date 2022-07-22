@@ -70,6 +70,13 @@ enum {
   KeyCodeCtrlQ          = 17,
   KeyCodeCtrlS          = 19,
   KeyCodeCtrlX          = 24,
+  KeyCodeCtrlV          = 22,
+  KeyCodeCtrlR          = 18,
+  KeyCodeCtrlD          = 4,
+  KeyCodeCtrlB          = 2,
+  KeyCodeCtrlO          = 15,
+  KeyCodeCtrlE          = 5,
+  KeyCodeCtrlU          = 21,
 
   KeyCodePrintableStart = 32,
   KeyCodePrintableEnd   = 126,
@@ -119,7 +126,12 @@ enum {
   UserKeyOpen          = KeyCodeCtrlG,
   UserKeyNew           = KeyCodeCtrlN,
   UserKeySave          = KeyCodeCtrlS,
-  UserKeyCommand       = KeyCodeCtrlC,
+  UserKeyCommand       = KeyCodeCtrlR,
+  UserKeyFind          = KeyCodeCtrlD,
+  UserKeyMark          = KeyCodeCtrlB,
+  UserKeyCopy          = KeyCodeCtrlC,
+  UserKeyPaste         = KeyCodeCtrlV,
+  UserKeyCut           = KeyCodeCtrlX,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -167,6 +179,10 @@ struct Window {
   int cursor_y;
   int ideal_cursor_x;
 
+  int mark_x;
+  int mark_y;
+  bool mark;
+
   bool redraw;
 
   int bar_type;
@@ -196,6 +212,7 @@ static Window* focused_window;
 static Region master_region;
 static WindowArray windows;
 static FileArray files;
+static CharArray clipboard;
 
 static bool redraw[1024];
 static bool running = true;
@@ -207,7 +224,7 @@ static int previous_keycode;
 static void delete_line(Line* line);
 static Line* append_line(File* file);
 static void append_chars(Line* line, char* data, int size);
-static void split_window(Window* window, bool vertical);
+static Window* split_window(Window* window, bool vertical);
 static void child_resized(Region* region);
 static void resize_child_regions(Region* region);
 static void resize_window(Window* window, int amount);
@@ -228,7 +245,7 @@ static void debug_print(const char* data, ...) {
   va_end(arguments);
 
   // Run tty in a remote terminal to get the path.
-  FILE* fd = fopen("/dev/pts/2", "w");
+  FILE* fd = fopen("/dev/pts/1", "w");
   assert(fd > 0);
 
   fwrite(buffer, 1, size, fd);
@@ -351,6 +368,12 @@ static void set_background_color(int color) {
 
 static void set_foreground_color(int color) {
   print("\x1b[38;2;%d;%d;%dm", (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void set_bold() {
+  print("\x1b[1m");
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -933,6 +956,151 @@ static void handle_delete(Window* window, bool delete_word) {
 
 //--------------------------------------------------------------------------------------------------
 
+static void copy_region(Window* window, int start_x, int start_y, int end_x, int end_y) {
+  if (!window->file) return;
+
+  debug_print("Copying\n");
+
+  clipboard.count = 0;
+
+  while (start_y != end_y) {
+    Line* line = window->file->lines.items[start_y];
+    for (int i = start_x; i < line->chars.count; i++) {
+      char_array_append(&clipboard, line->chars.items[i]);
+    }
+
+    char_array_append(&clipboard, '\n');
+    start_x = 0;
+    start_y++;
+  }
+
+  Line* line = window->file->lines.items[start_y];
+  for (int i = start_x; i < end_x; i++) {
+    char_array_append(&clipboard, line->chars.items[i]);
+  }
+
+  for (int i = 0; i < clipboard.count; i++) {
+    if (clipboard.items[i] == '\n') {
+      debug_print("\\n\n");
+    }
+    else {
+      debug_print("%c", clipboard.items[i]);
+    }
+  }
+
+  debug_print("\n");
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void delete_region(Window* window, int start_x, int start_y, int end_x, int end_y) {
+  if (!window->file) return;
+
+  debug_print("Delete region\n");
+
+  //     |
+  // aoesntaosn aho
+  // aoesnut aohesuntaho esuntaoh eusnaoh
+  // asoetuha oesnuthao esnuh aosneuhsna
+  //   |
+
+  window->file->redraw = true;
+
+  if (start_y == end_y) {
+    debug_print("Sname line\n");
+    Line* start = window->file->lines.items[start_y];
+    int count = end_x - start_x;
+    while (count--) {
+      char_array_remove(&start->chars, start_x);
+    }
+    return;
+  }
+
+  int index = start_y;
+
+  for (int i = start_y + 1; i < end_y; i++) {
+    delete_line(window->file->lines.items[start_y + 1]);
+    line_array_remove(&window->file->lines, start_y + 1);
+  }
+
+  Line* start = window->file->lines.items[start_y];
+  Line* end = window->file->lines.items[start_y + 1];
+
+  start->chars.count = start_x;
+  char_array_append_multiple(&start->chars, end->chars.items, end_x);
+  
+  while (end_x--) {
+    char_array_remove(&end->chars, 0);
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void handle_copy(Window* window) {
+  if (!window->file || !window->mark) {
+    error(window, "copy error");
+    return;
+  }
+
+  int start_x = window->mark_x;
+  int start_y = window->mark_y;
+  int end_x = window->cursor_x;
+  int end_y = window->cursor_y;
+
+  if (window->cursor_y < window->mark_y || (window->cursor_y == window->mark_y && window->cursor_x < window->mark_y)) {
+    start_x = window->cursor_x;
+    start_y = window->cursor_y;
+    end_x = window->mark_x;
+    end_y = window->mark_y;
+  }
+  debug_print("Copying from [%d, %d] to [%d, %d]\n", start_x, start_y, end_x, end_y);
+  
+  copy_region(window, start_x, start_y, end_x, end_y);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void handle_cut(Window* window) {
+  if (!window->file || !window->mark) {
+    error(window, "cut error");
+    return;
+  }
+
+  int start_x = window->mark_x;
+  int start_y = window->mark_y;
+  int end_x = window->cursor_x;
+  int end_y = window->cursor_y;
+
+  if (window->cursor_y < window->mark_y || (window->cursor_y == window->mark_y && window->cursor_x < window->mark_y)) {
+    start_x = window->cursor_x;
+    start_y = window->cursor_y;
+    end_x = window->mark_x;
+    end_y = window->mark_y;
+  }
+  debug_print("Cutting from [%d, %d] to [%d, %d]\n", start_x, start_y, end_x, end_y);
+  
+  copy_region(window, start_x, start_y, end_x, end_y);
+  delete_region(window, start_x, start_y, end_x, end_y);
+
+  window->cursor_x = start_x;
+  window->cursor_y = start_y;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void handle_paste(Window* window) {
+  if (!window->file || clipboard.count == 0) {
+    error(window, "paste error");
+    return;
+  }
+
+  for (int i = 0; i < clipboard.count; i++) {
+    file_insert_char(window, clipboard.items[i]);
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+
 static void editor_handle_keypress(Window* window, int keycode) {
   if (window->file && KeyCodePrintableStart <= keycode && keycode <= KeyCodePrintableEnd) {
     file_insert_char(window, keycode);
@@ -1045,13 +1213,31 @@ static void editor_handle_keypress(Window* window, int keycode) {
       window->error_active = false;
       break;
     
+    case UserKeyMark:
+      window->mark = !window->mark;
+      window->mark_x = window->cursor_x;
+      window->mark_y = window->cursor_y;
+      break;
+
+    case UserKeyCut:
+      handle_cut(window);
+      break;
+
+    case UserKeyCopy:
+      handle_copy(window);
+      break;
+
+    case UserKeyPaste:
+      handle_paste(window);
+      break;
+    
     case UserKeySave:
       if (!window->file) break;
 
       if (!save_file(window->file)) {
         error(window, "can not save file `%.*s`", window->file->path.count, window->file->path.items);
       }
-      
+
       break;
 
     default:
@@ -1070,6 +1256,7 @@ static void change_file(Window* window, File* file) {
   window->offset_x = 0;
   window->offset_y = 0;
   window->ideal_cursor_x = 0;
+  window->mark = false;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1331,17 +1518,25 @@ static void render_status_bar(Window* window) {
       if (!window->file->saved) {
         size++;
       }
+
+      if (window->mark) {
+        size += 3;
+      }
     }
 
 
     invert();
 
     if (window == focused_window) {
-
+      set_bold();
     }
 
     for (int i = 0; i < width - size; i++) {
       print(" ");
+    }
+
+    if (window->mark) {
+      print("[] ");
     }
 
     if (window->file) {
@@ -1668,7 +1863,7 @@ static void swap_windows(Window* window) {
 
 //--------------------------------------------------------------------------------------------------
 
-static void split_window(Window* window, bool vertical) {
+static Window* split_window(Window* window, bool vertical) {
   Region* region = window->region;
 
   region->window = 0;
@@ -1686,6 +1881,7 @@ static void split_window(Window* window, bool vertical) {
   region->stacked_layout = vertical;
 
   resize_child_regions(region);
+  return region->childs[1]->window;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1739,6 +1935,12 @@ static void editor_init() {
 int main() {
   terminal_init();
   editor_init();
+
+  char path[] = "test/test.txt";
+  File* file = open_file(path, sizeof(path) - 1);
+  master_region.window->file = file;
+  Window* window = split_window(master_region.window, false);
+  window->file = file;
 
   while (running) {
     render();

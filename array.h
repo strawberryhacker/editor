@@ -15,7 +15,10 @@
 typedef struct {                                                                                                   \
   ItemType* items;                                                                                                 \
   int capacity;                                                                                                    \
-  int count;                                                                                                       \
+  union {                                                                                                          \
+    int count;                                                                                                     \
+    int size;                                                                                                      \
+  };                                                                                                               \
 } ArrayType;                                                                                                       \
                                                                                                                    \
 static inline void name##_resize(ArrayType* array, int capacity) {                                                 \

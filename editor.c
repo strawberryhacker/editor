@@ -51,8 +51,9 @@ define_array(window_array, WindowArray, Window* );
 //--------------------------------------------------------------------------------------------------
 
 enum {
-  ColorCodeRed  = 0xff0000,
-  ColorCodePink = 0xfc03c2,
+  ColorCodeRed   = 0xff0000,
+  ColorCodePink  = 0xfc03c2,
+  ColorCodeGreen = 0x03a309,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -1588,7 +1589,7 @@ static void render_window(Window* window) {
         color = line->colors.items[index];
 
         if (color) {
-          set_foreground_color(ColorCodePink);
+          set_foreground_color(ColorCodeGreen);
         }
         else {
           clear_formatting();
@@ -1886,6 +1887,72 @@ static Window* split_window(Window* window, bool vertical) {
 
 //--------------------------------------------------------------------------------------------------
 
+static int char_lookup[256];
+static int index_lookup[1024];
+
+//--------------------------------------------------------------------------------------------------
+
+static void make_search_lookup(char* data, int size) {
+  for (int i = 0; i < 256; i++) {
+    char_lookup[i] = size;
+  }
+
+  for (int i = 0; i < size; i++) {
+    char_lookup[(int)data[i]] = size - i - 1;
+  }
+
+  for (int i = size - 1; i > 0; i--) {
+    int shift = 0;
+    for (int j = i - 1; j >= 0; j--) {
+      if (!strncmp(data + j, data + i, size - i)) {
+        if ((j && data[j] != data[i - 1]) || !shift) {
+          shift = i - j;
+        }
+      }
+    }
+
+    index_lookup[i] = shift ? shift : 1;
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void search(char* word, char* data) {
+  int word_size = strlen(word);
+  int data_size = strlen(data);
+  int data_index = word_size - 1;
+
+  int count = 0;
+  int indices[1024];
+
+  make_lookup_tables(word, word_size);
+
+  while (data_index < data_size) {
+    int tmp_data_index = data_index;
+    int word_index = word_size - 1;
+    int match_count = 0;
+
+    while (word_index >= 0 && word[word_index] == data[data_index]) {
+      word_index--;
+      data_index--;
+      match_count++;
+    }
+
+    if (word_index < 0) {
+      indices[count++] = data_index + 1;
+      data_index += word_size + 1;
+    }
+    else if (match_count) {
+      data_index = tmp_data_index + index_lookup[match_count];
+    }
+    else {
+      data_index = tmp_data_index + char_lookup[(int)data[data_index]];
+    }
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+
 static void window_resize_handler() {
   get_terminal_size(&master_region.width, &master_region.height);
   resize_child_regions(&master_region);
@@ -1933,6 +2000,10 @@ static void editor_init() {
 //--------------------------------------------------------------------------------------------------
 
 int main() {
+
+
+  return 0;
+
   terminal_init();
   editor_init();
 

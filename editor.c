@@ -63,6 +63,81 @@ define_array(window_array, WindowArray, Window* );
 //--------------------------------------------------------------------------------------------------
 
 enum {
+  ColorSolarizedBase03 = 0x002b36,
+  ColorSolarizedBase02 = 0x073642,
+  ColorSolarizedBase01 = 0x586e75,
+  ColorSolarizedBase00 = 0x657b83,
+  ColorSolarizedBase0  = 0x839496,
+  ColorSolarizedBase1  = 0x93a1a1,
+  ColorSolarizedBase2  = 0xeee8d5,
+  ColorSolarizedBase3  = 0xfdf6e3,
+  ColorSolarizedRed    = 0xdc322f,
+  ColorSolarizedViolet = 0x6c71c4,
+};
+
+//--------------------------------------------------------------------------------------------------
+
+enum {
+  ColorTypeEditorCursor,
+  ColorTypeEditorForeground,
+  ColorTypeEditorBackground,
+  ColorTypeStatusBarCursor,
+  ColorTypeStatusBarForeground,
+  ColorTypeStatusBarBackground,
+  ColorTypeStatusBarError,
+  ColorTypeSelectedMatchBackground,
+  ColorTypeMatchBackground,
+  ColorTypeMatchForeground,
+  ColorTypeCount,
+};
+
+//--------------------------------------------------------------------------------------------------
+
+enum {
+  ColorSchemeDefault,
+  ColorSchemeLight,
+  ColorSchemeCount,
+};
+
+//--------------------------------------------------------------------------------------------------
+
+static const struct { char* name; int colors[ColorTypeCount]; } schemes[ColorSchemeCount] = {
+  [ColorSchemeDefault] = {
+    .name = "default",
+    .colors = {
+      [ColorTypeEditorCursor]            = ColorSolarizedBase0,
+      [ColorTypeEditorForeground]        = ColorSolarizedBase0,
+      [ColorTypeEditorBackground]        = ColorSolarizedBase03,
+      [ColorTypeStatusBarCursor]         = ColorSolarizedBase01,
+      [ColorTypeStatusBarForeground]     = ColorSolarizedBase01,
+      [ColorTypeStatusBarBackground]     = ColorSolarizedBase3,
+      [ColorTypeStatusBarError]          = ColorSolarizedRed,
+      [ColorTypeSelectedMatchBackground] = ColorSolarizedViolet,
+      [ColorTypeMatchBackground]         = ColorSolarizedViolet,
+      [ColorTypeMatchForeground]         = ColorSolarizedViolet,
+    },
+  },
+
+  [ColorSchemeLight] = {
+    .name = "light",
+    .colors = {
+      [ColorTypeEditorCursor]            = ColorSolarizedBase3,
+      [ColorTypeEditorForeground]        = ColorSolarizedBase3,
+      [ColorTypeEditorBackground]        = ColorSolarizedBase01,
+      [ColorTypeStatusBarCursor]         = ColorSolarizedBase01,
+      [ColorTypeStatusBarForeground]     = ColorSolarizedBase01,
+      [ColorTypeStatusBarBackground]     = ColorSolarizedBase2,
+      [ColorTypeStatusBarError]          = ColorSolarizedRed,
+      [ColorTypeSelectedMatchBackground] = ColorSolarizedViolet,
+      [ColorTypeMatchBackground]         = ColorSolarizedViolet,
+      [ColorTypeMatchForeground]         = ColorSolarizedViolet,
+    },
+  },
+};
+
+//--------------------------------------------------------------------------------------------------
+
+enum {
   ColorCodeRed   = 0xff0000,
   ColorCodePink  = 0xfc03c2,
   ColorCodeGreen = 0x03a309,
@@ -257,6 +332,7 @@ static bool redraw[1024];
 static bool running = true;
 
 static int previous_keycode;
+static int current_scheme;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -404,13 +480,15 @@ static int invert_color(int color) {
 
 //--------------------------------------------------------------------------------------------------
 
-static void set_terminal_background_color(int color) {
+static void set_terminal_background_color() {
+  int color = schemes[current_scheme].colors[ColorTypeEditorBackground];
   print("\x1b]11;rgb:%x/%x/%x\x7", (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
 }
 
 //--------------------------------------------------------------------------------------------------
 
-static void set_cursor_color(int color) {
+static void set_cursor_color(int type) {
+  int color = schemes[current_scheme].colors[type];
   print("\x1b]12;rgb:%x/%x/%x\x7", (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
 }
 
@@ -430,13 +508,15 @@ static void reset_terminal_colors() {
 
 //--------------------------------------------------------------------------------------------------
 
-static void set_background_color(int color) {
+static void set_background_color(int type) {
+  int color = schemes[current_scheme].colors[type];
   print("\x1b[48;2;%d;%d;%dm", (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
 }
 
 //--------------------------------------------------------------------------------------------------
 
-static void set_foreground_color(int color) {
+static void set_foreground_color(int type) {
+  int color = schemes[current_scheme].colors[type];
   print("\x1b[38;2;%d;%d;%dm", (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
 }
 
@@ -448,13 +528,8 @@ static void bold() {
 
 //--------------------------------------------------------------------------------------------------
 
-// I want the status bar to have inverted color. This mean the cursor culor should be inverted.
-// This is not really possible. A hack is to set cursor color manually. In this case the foreground 
-// must be manually set to avoid the cursor color filling everything - messed up!
-
 static void clear_formatting() {
   print("\x1b[0m");
-  set_foreground_color(ColorForeground);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1473,6 +1548,29 @@ static void handle_command(Window* window) {
       error(window, "cant split");
     }
   }
+  else if (skip_keyword(&command, "scheme")) {
+    int scheme = -1;
+    if (!read_number(&command, &scheme)) {
+      int size;
+      char* name = get_name(&command, &size);
+      if (size) {
+        for (int i = 0; i < ColorSchemeCount; i++) {
+          if (!strncmp(schemes[i].name, name, size)) {
+            scheme = i;
+            break;
+          }
+        }
+      }
+    }
+    if (0 <= scheme && scheme < ColorSchemeCount) {
+      current_scheme = scheme;
+      set_terminal_background_color();
+
+      for (int i = 0; i < windows.count; i++) {
+        windows.items[i]->redraw = true;
+      }
+    }
+  }
   else if (skip_keyword(&command, "close")) {
     remove_window(window);
   }
@@ -1642,18 +1740,18 @@ static void render_status_bar(Window* window) {
   }
 
   //invert();
-  set_background_color(ColorBarBackground);
-  set_foreground_color(ColorBarForeground);
+  set_background_color(ColorTypeStatusBarBackground);
+  set_foreground_color(ColorTypeStatusBarForeground);
 
   set_window_cursor(window, 0, window->region->height - 1);
 
   print("%*c", StatusBarLeftPadding, ' ');
 
   if (window->error_active) {
-    set_foreground_color(ColorError);
+    set_foreground_color(ColorTypeStatusBarError);
     width -= print("error: ");
     width -= print("%.*s", min(window->error_message.count, width), window->error_message.items);
-    set_foreground_color(ColorBarForeground);
+    set_foreground_color(ColorTypeStatusBarForeground);
   }
   else if (window->bar_focused) {
     width -= print("%s", bar_message[window->bar_type]);
@@ -1705,8 +1803,8 @@ static void render_window(Window* window) {
 
     int color = 0;
 
-    set_background_color(ColorBackground);
-    set_foreground_color(ColorForeground);
+    set_background_color(ColorTypeEditorBackground);
+    set_foreground_color(ColorTypeEditorForeground);
 
     for (int j = 0; j < get_visible_line_count(window); j++) {
       if (!redraw[window->region->y + j]) continue;
@@ -1716,9 +1814,9 @@ static void render_window(Window* window) {
       set_window_cursor(window, 0, j);
 
       if (window->region->x) {
-        invert();
+        set_background_color(ColorTypeStatusBarBackground);
         print(" ");
-        clear_formatting();
+        set_background_color(ColorTypeEditorBackground);
         print(" ");
       }
 
@@ -1734,10 +1832,10 @@ static void render_window(Window* window) {
           color = line->colors.items[index];
 
           if (color) {
-            set_foreground_color(ColorCodeGreen);
+            set_foreground_color(ColorTypeMatchBackground);
           }
           else {
-            set_foreground_color(ColorForeground);
+            set_foreground_color(ColorTypeEditorForeground);
           }
         }
 
@@ -1745,9 +1843,7 @@ static void render_window(Window* window) {
       }
 
       if (color) {
-        //clear_formatting();
-        set_background_color(ColorBackground);
-        set_foreground_color(ColorForeground);
+        set_foreground_color(ColorTypeEditorForeground);
       }
     }
 
@@ -1755,11 +1851,9 @@ static void render_window(Window* window) {
       if (!redraw[window->region->y + j]) continue;
       set_window_cursor(window, 0, j);
       if (window->region->x) {
-        set_background_color(ColorBarBackground);
-        //invert();
+        set_background_color(ColorTypeStatusBarBackground);
         print(" ");
-        set_background_color(ColorBackground);
-        //clear_formatting();
+        set_background_color(ColorTypeEditorBackground);
         print(" ");
       }
     }
@@ -1823,7 +1917,7 @@ static void render() {
 
   mark_lines_for_redraw();
 
-  set_background_color(ColorBackground);
+  set_background_color(ColorTypeEditorBackground);
 
   for (int i = 0; i < master_region.height; i++) {
     if (redraw[i]) {
@@ -1843,12 +1937,12 @@ static void render() {
   int cursor_y;
 
   if (window->bar_focused) {
-    set_cursor_color(ColorBarCursor);
+    set_cursor_color(ColorTypeStatusBarCursor);
     cursor_x = window->bar_cursor - window->bar_offset + get_left_bar_padding(window);
     cursor_y = window->region->height - 1;
   }
   else {
-    set_cursor_color(ColorNormalCursor);  // Todo: do this only when the mode changes.
+    set_cursor_color(ColorTypeEditorCursor);  // Todo: do this only when the mode changes.
     cursor_x = window->cursor_x - window->offset_x + get_left_padding(window);
     cursor_y = window->cursor_y - window->offset_y;
   }
@@ -2151,8 +2245,8 @@ static void editor_init() {
 
   resize_master_region();
 
-  set_cursor_color(ColorNormalCursor);
-  set_terminal_background_color(ColorBackground);
+  set_cursor_color(ColorTypeEditorCursor);
+  set_terminal_background_color(ColorTypeEditorBackground);
   clear_terminal();
   flush();
 }

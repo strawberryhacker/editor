@@ -20,8 +20,6 @@
 #define WindowCursorMarginLeft   6
 #define WindowCursorMarginRight  6
 
-#define BarCursorMarginLeft  5
-#define BarCursorMarginRight 5
 
 #define LinenumberMargin 2
 #define StatusBarCount   1
@@ -30,6 +28,15 @@
 
 #define MinimumWindowWidth  40
 #define MinimumWindowHeight 10
+
+
+// Status bar display settings.
+#define MaxPathWidth 20
+#define StatusBarCommandPadding 1
+#define StatusBarLeftPadding 1
+#define StatusBarRightPadding 1
+#define BarCursorMarginLeft  5
+#define BarCursorMarginRight 5
 
 //--------------------------------------------------------------------------------------------------
 
@@ -45,7 +52,6 @@ typedef struct Line Line;
 typedef struct File File;
 typedef struct Window Window;
 typedef struct Region Region;
-typedef struct Issue Issue;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -53,7 +59,6 @@ define_array(char_array, CharArray, char);
 define_array(line_array, LineArray, Line* );
 define_array(file_array, FileArray, File* );
 define_array(window_array, WindowArray, Window* );
-define_array(issue_array, IssueArray, Issue*);
 
 //--------------------------------------------------------------------------------------------------
 
@@ -61,6 +66,16 @@ enum {
   ColorCodeRed   = 0xff0000,
   ColorCodePink  = 0xfc03c2,
   ColorCodeGreen = 0x03a309,
+};
+
+enum {
+  ColorForeground    = 0xfdf6e3,
+  ColorBackground    = 0x93a1a1,
+  ColorError         = 0xdc322f,
+  ColorBarBackground = 0xfdf6e3,
+  ColorBarForeground = 0x93a1a1,
+  ColorBarCursor     = 0xfdf6e3,
+  ColorNormalCursor  = 0x657b83,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -178,24 +193,12 @@ struct Region {
   int width;
   int height;
 
-  float split_weight;
-  bool stacked_layout;
+  float split;
+  bool stacked;
 
   Region* parent;
   Region* childs[2];
   Window* window;
-};
-
-//--------------------------------------------------------------------------------------------------
-
-struct Issue {
-  File* file;
-
-  int line;
-  int column;
-  
-  char* message;
-  int message_size;//•
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -229,21 +232,15 @@ struct Window {
   bool error_active;
   CharArray error_message;
 
-  // Todo:
-
-  /*
-  bool mode; // either normal, command, open, etc.
-  */
-
  // Remove the error timeout. Escape or any new command/character should do!
 };
 
 //--------------------------------------------------------------------------------------------------
 
 static char* bar_message[BarTypeCount] = {
-  [BarTypeOpen]    = " open: ",
-  [BarTypeNew]     = " new: ",
-  [BarTypeCommand] = " command: "
+  [BarTypeOpen]    = "open: ",
+  [BarTypeNew]     = "new: ",
+  [BarTypeCommand] = "command: "
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -397,8 +394,38 @@ static void invert() {
 
 //--------------------------------------------------------------------------------------------------
 
-static void clear_formatting() {
-  print("\x1b[0m");
+static int invert_color(int color) {
+  int r = 255 - ((color >> 16) & 0xFF);
+  int g = 255 - ((color >> 8 ) & 0xFF);
+  int b = 255 - ((color >> 0 ) & 0xFF);
+
+  return r << 16 | g << 8 | b;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void set_terminal_background_color(int color) {
+  print("\x1b]11;rgb:%x/%x/%x\x7", (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void set_cursor_color(int color) {
+  print("\x1b]12;rgb:%x/%x/%x\x7", (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void reset_cursor_color() {
+  print("\x1b]104;258\x7");
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void reset_terminal_colors() {
+  print("\x1b]104;256\x7");
+  print("\x1b]104;257\x7");
+  print("\x1b]104;258\x7");
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -415,8 +442,19 @@ static void set_foreground_color(int color) {
 
 //--------------------------------------------------------------------------------------------------
 
-static void set_bold() {
+static void bold() {
   print("\x1b[1m");
+}
+
+//--------------------------------------------------------------------------------------------------
+
+// I want the status bar to have inverted color. This mean the cursor culor should be inverted.
+// This is not really possible. A hack is to set cursor color manually. In this case the foreground 
+// must be manually set to avoid the cursor color filling everything - messed up!
+
+static void clear_formatting() {
+  print("\x1b[0m");
+  set_foreground_color(ColorForeground);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -559,6 +597,7 @@ static File* open_file(char* path, int path_size) {
 
     File* file = files.items[i];
     if (path_size == file->path.count && !memcmp(path, file->path.items, path_size)) {
+      debug_print("Returnig existing file: %d\n", file->lines.count);
       return file;
     }
   }
@@ -614,6 +653,12 @@ static File* open_file(char* path, int path_size) {
     }
   }
 
+  if (index < size) {
+    Line* line = append_line(file);
+    append_chars(line, &data[index], size - index - cr);
+  }
+
+  debug_print("Returnig new file: %d\n", file->lines.count);
   return file;
 }
 
@@ -739,14 +784,18 @@ static int count_digits(int number) {
 //--------------------------------------------------------------------------------------------------
 
 static int get_left_padding(Window* window) {
-  if (window->file == 0) return LinenumberMargin + 1;
-  return count_digits(window->file->lines.count) + LinenumberMargin + (window->file->issues == true);
+  if (!window->file) {
+    return LinenumberMargin + 1;
+  }
+  else {
+    return (window->region->x ? 2 : 0) + count_digits(window->file->lines.count) + LinenumberMargin + (window->file->issues == true);
+  }
 }
 
 //--------------------------------------------------------------------------------------------------
 
 static int get_left_bar_padding(Window* window) {
-  return strlen(bar_message[window->bar_type]);
+  return StatusBarLeftPadding + strlen(bar_message[window->bar_type]);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -760,8 +809,6 @@ static void get_active_size(Window* window, int* width, int* height) {
 //--------------------------------------------------------------------------------------------------
 
 static int get_visible_line_count(Window* window) {
-  if (!window->file) return 0;
-
   int width, height;
   get_active_size(window, &width, &height);
   return min(height, window->file->lines.count - window->offset_y);
@@ -788,8 +835,6 @@ static int get_updated_offset(int cursor, int offset, int width, int left_margin
 //--------------------------------------------------------------------------------------------------
 
 static void update_window_offsets(Window* window) {
-  if (!window->file) return;
-
   int prev_offset_x = window->offset_x;
   int prev_offset_y = window->offset_y;
 
@@ -832,8 +877,6 @@ static void update_window_cursor_y(Window* window, int y) {
 //--------------------------------------------------------------------------------------------------
 
 static void update_window_offset_y(Window* window, int offset) {
-  if (!window->file) return;
-
   window->offset_y = limit(offset, 0, window->file->lines.count);
   window->redraw = true;
 }
@@ -947,15 +990,13 @@ static void enter_bar_mode(Window* window, int type) {
 
 //--------------------------------------------------------------------------------------------------
 
-static bool is_letter_or_number(char c) {
-  return ('0' <= c && c <= '9') || ('A' <= c && c <= 'Z') || ('a' <= c && c <= 'z');
+static bool is_name_letter(char c) {
+  return ('0' <= c && c <= '9') || ('A' <= c && c <= 'Z') || ('a' <= c && c <= 'z') || (c == '_');
 }
 
 //--------------------------------------------------------------------------------------------------
 
 static int get_delete_count(Window* window, bool delete_word) {
-  if (!window->file) return 0;
-  
   Line* line = window->file->lines.items[window->cursor_y];
   char* data = line->chars.items;
   int size = window->cursor_y;
@@ -977,7 +1018,7 @@ static int get_delete_count(Window* window, bool delete_word) {
       space_count++;
     }
 
-    if (is_letter_or_number(c)) {
+    if (is_name_letter(c)) {
       char_count++;
     }
     else {
@@ -998,8 +1039,23 @@ static int get_delete_count(Window* window, bool delete_word) {
 
 //--------------------------------------------------------------------------------------------------
 
+// Makes sure the start mark comes before the end mark.
+static void normalize_block(int* start_x, int* start_y, int* end_x, int* end_y) {
+  if (*start_y > *end_y || (*start_y == *end_y && *start_x > *end_x)) {
+    int tmp_x = *start_x;
+    int tmp_y = *start_y;
+
+    *start_x = *end_x;
+    *start_y = *end_y;
+
+    *end_x = tmp_x;
+    *end_y = tmp_y;
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+
 static void handle_delete(Window* window, bool delete_word) {
-  if (!window->file) return;
   int delete_count = get_delete_count(window, delete_word);
   while (delete_count--) {
     file_delete_char(window);
@@ -1009,8 +1065,6 @@ static void handle_delete(Window* window, bool delete_word) {
 //--------------------------------------------------------------------------------------------------
 
 static void copy_region(Window* window, int start_x, int start_y, int end_x, int end_y) {
-  if (!window->file) return;
-
   debug_print("Copying\n");
 
   clipboard.count = 0;
@@ -1047,12 +1101,10 @@ static void copy_region(Window* window, int start_x, int start_y, int end_x, int
 //--------------------------------------------------------------------------------------------------
 
 static void delete_region(Window* window, int start_x, int start_y, int end_x, int end_y) {
-  if (!window->file) return;
-
   window->file->redraw = true;
 
   if (start_y == end_y) {
-    debug_print("Sname line\n");
+    debug_print("Same line\n");
     Line* start = window->file->lines.items[start_y];
     int count = end_x - start_x;
     while (count--) {
@@ -1094,13 +1146,8 @@ static void handle_copy(Window* window) {
   int end_x = window->cursor_x;
   int end_y = window->cursor_y;
 
-  // Wrong!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Fix!!!!!!!!!!!!!!!!!!!
-  if (window->cursor_y < window->mark_y || (window->cursor_y == window->mark_y && window->cursor_x < window->mark_y)) {
-    start_x = window->cursor_x;
-    start_y = window->cursor_y;
-    end_x = window->mark_x;
-    end_y = window->mark_y;
-  }
+  normalize_block(&start_x, &start_y, &end_x, &end_y);
+
   debug_print("Copying from [%d, %d] to [%d, %d]\n", start_x, start_y, end_x, end_y);
   
   copy_region(window, start_x, start_y, end_x, end_y);
@@ -1119,12 +1166,8 @@ static void handle_cut(Window* window) {
   int end_x = window->cursor_x;
   int end_y = window->cursor_y;
 
-  if (window->cursor_y < window->mark_y || (window->cursor_y == window->mark_y && window->cursor_x < window->mark_y)) {
-    start_x = window->cursor_x;
-    start_y = window->cursor_y;
-    end_x = window->mark_x;
-    end_y = window->mark_y;
-  }
+  normalize_block(&start_x, &start_y, &end_x, &end_y);
+
   debug_print("Cutting from [%d, %d] to [%d, %d]\n", start_x, start_y, end_x, end_y);
   
   copy_region(window, start_x, start_y, end_x, end_y);
@@ -1149,18 +1192,27 @@ static void handle_paste(Window* window) {
 
 //--------------------------------------------------------------------------------------------------
 
-static void compile() {
-  compile_and_parse_issues();
-}
-
-//--------------------------------------------------------------------------------------------------
-
 static void editor_handle_keypress(Window* window, int keycode) {
   if (window->file && KeyCodePrintableStart <= keycode && keycode <= KeyCodePrintableEnd) {
     file_insert_char(window, keycode, true);
     window->file->saved = false;
   }
-  else switch (keycode) {
+  else if (keycode == UserKeyOpen) {
+    enter_bar_mode(window, BarTypeOpen);
+  }
+  else if (keycode == UserKeyFocusNext) {
+    focus_next();
+  }
+  else if (keycode == UserKeyFocusPrevious) {
+    focus_previous();
+  }
+  else if (keycode == UserKeyNew) {
+    enter_bar_mode(window, BarTypeNew);
+  }
+  else if (keycode == UserKeyCommand) {
+    enter_bar_mode(window, BarTypeCommand);
+  }
+  else if (window->file) switch (keycode) {
     case KeyCodeUp:
       update_window_cursor_y(window, window->cursor_y - 1);
       break;
@@ -1185,7 +1237,6 @@ static void editor_handle_keypress(Window* window, int keycode) {
       break;
 
     case KeyCodeShiftEnd:
-      if (!window->file) break;
       update_window_cursor_x(window, window->file->lines.items[window->file->lines.count - 1]->chars.count);
       update_window_cursor_y(window, window->file->lines.count - 1);
       break;
@@ -1198,12 +1249,18 @@ static void editor_handle_keypress(Window* window, int keycode) {
       update_window_cursor_x(window, window->cursor_x + 1);
       break;
 
-    case KeyCodeHome:
-      update_window_cursor_x(window, 0);
+    case KeyCodeHome: {
+      int spaces = get_leading_spaces(window->file->lines.items[window->cursor_y]);
+      if (window->cursor_x > spaces) {
+        update_window_cursor_x(window, spaces);
+      }
+      else {
+        update_window_cursor_x(window, 0);
+      }
       break;
+    }
 
     case KeyCodeEnd:
-      if (!window->file) break;
       update_window_cursor_x(window, window->file->lines.items[window->cursor_y]->chars.count);
       break;
 
@@ -1231,12 +1288,7 @@ static void editor_handle_keypress(Window* window, int keycode) {
       handle_delete(window, false);
       break;
 
-    case UserKeyCompile:
-      compile();
-      break;
-
     case KeyCodeTab:
-      if (!window->file) break;
       window->file->saved = false;
       for (int i = 0; i < SpacesPerTab; i++) {
         file_insert_char(window, ' ', true);
@@ -1244,7 +1296,6 @@ static void editor_handle_keypress(Window* window, int keycode) {
       break;
 
     case KeyCodeEnter:
-      if (!window->file) break;
       window->file->saved = false;
       file_insert_char(window, '\n', true);
       break;
@@ -1255,10 +1306,6 @@ static void editor_handle_keypress(Window* window, int keycode) {
 
     case UserKeyFocusPrevious:
       focus_previous();
-      break;
-
-    case UserKeyOpen:
-      enter_bar_mode(window, BarTypeOpen);
       break;
 
     case UserKeyNew:
@@ -1292,8 +1339,6 @@ static void editor_handle_keypress(Window* window, int keycode) {
       break;
     
     case UserKeySave:
-      if (!window->file) break;
-
       if (!save_file(window->file)) {
         error(window, "can not save file `%.*s`", window->file->path.count, window->file->path.items);
       }
@@ -1366,7 +1411,7 @@ static char* get_name(char** data, int* size) {
   char* tmp = *data;
   char* start = tmp;
 
-  while (*tmp && is_letter_or_number(*tmp)) {  // Note: will accept names which start with numbers.
+  while (*tmp && is_name_letter(*tmp)) {  // Note: will accept names which start with numbers.
     tmp++;
   }
 
@@ -1574,137 +1619,151 @@ static void update() {
 //--------------------------------------------------------------------------------------------------
 
 static void render_status_bar(Window* window) {
-  int width = window->region->width;
+  static const char unsaved_string[] = "*";
+  static const char marked_string[] = "[] ";
+  static const char nofile_string[] = "no file";
+
+  int width = window->region->width - StatusBarLeftPadding - StatusBarRightPadding;
+  int percent;
+
+  if (window->file) {
+    assert(window->file->lines.count);
+    percent = 100 * window->cursor_y / window->file->lines.count;
+
+    int path_width = min(window->file->path.size, MaxPathWidth) + 1;
+    int unsaved_width = !window->file->saved ? sizeof(unsaved_string) - 1 : 0;
+    int marked_width = window->mark_valid ? sizeof(marked_string) - 1 : 0;
+    int percent_width = count_digits(percent) + sizeof((char)'%');
+
+    width -= path_width + unsaved_width + marked_width + percent_width;
+  }
+  else {
+    width -= sizeof(nofile_string) - 1;
+  }
+
+  //invert();
+  set_background_color(ColorBarBackground);
+  set_foreground_color(ColorBarForeground);
 
   set_window_cursor(window, 0, window->region->height - 1);
 
-  if (window->error_active || window->bar_focused) {
-    if (window->error_active) {
-      set_foreground_color(ColorCodeRed);
+  print("%*c", StatusBarLeftPadding, ' ');
 
-      width -= print(" error: ");
-      width -= print("%.*s", min(window->error_message.count, width), window->error_message.items);  
+  if (window->error_active) {
+    set_foreground_color(ColorError);
+    width -= print("error: ");
+    width -= print("%.*s", min(window->error_message.count, width), window->error_message.items);
+    set_foreground_color(ColorBarForeground);
+  }
+  else if (window->bar_focused) {
+    width -= print("%s", bar_message[window->bar_type]);
 
-      clear_formatting();
+    window->bar_offset = get_updated_offset(window->bar_cursor, window->bar_offset, width, BarCursorMarginLeft, BarCursorMarginRight);
+    int bar_size = min(window->bar_chars.count - window->bar_offset, width - StatusBarCommandPadding);
+
+    width -= print("%.*s", bar_size, &window->bar_chars.items[window->bar_offset]);
+  }
+  
+  if (width) {
+    print("%*c", width, ' ');
+  }
+
+  if (window == focused_window) {
+    bold();
+  }
+  
+  if (window->file) {
+    if (window->mark_valid) {
+      print("%s", marked_string);
     }
-    else if (window->bar_focused) {
-      width -= print("%s", bar_message[window->bar_type]) - 1;
-      width -= 1;
 
-      window->bar_offset = get_updated_offset(window->bar_cursor, window->bar_offset, width, BarCursorMarginLeft, BarCursorMarginRight);
-      int bar_size = min(window->bar_chars.count - window->bar_offset, width);
+    print("%.*s", window->file->path.count, window->file->path.items);
 
-      width -= print("%.*s", bar_size, &window->bar_chars.items[window->bar_offset]);
+    if (!window->file->saved) {
+      print("%s", unsaved_string);
     }
+
+    print(" %d%%", percent);
   }
   else {
-    int size = 0;
-    int percent;
-
-    if (window->file) {
-      percent = 100 * window->cursor_y / window->file->lines.count;
-      size = window->file->path.count + 1 + count_digits(percent) + sizeof((char)'%') + 1;
-      
-      if (!window->file->saved) {
-        size++;
-      }
-
-      if (window->mark_valid) {
-        size += 3;
-      }
-    }
-
-
-    invert();
-
-    if (window == focused_window) {
-      set_bold();
-    }
-
-    for (int i = 0; i < width - size; i++) {
-      print(" ");
-    }
-
-    if (window->mark_valid) {
-      print("[] ");
-    }
-
-    if (window->file) {
-      print("%.*s", window->file->path.count, window->file->path.items);
-      if (!window->file->saved) {
-        print("*");
-      }
-
-      print(" %d%% ", percent);
-    }
-
-    clear_formatting();
+    print("%s", nofile_string);
   }
+
+  print("%*c", StatusBarRightPadding, ' ');
+  
+  clear_formatting();
 }
 
 //--------------------------------------------------------------------------------------------------
 
 static void render_window(Window* window) {
-  int width, height;
-  get_active_size(window, &width, &height);
+  if (window->file) {
+    int width, height;
+    get_active_size(window, &width, &height);
 
-  int number_width = window->file ? count_digits(window->file->lines.count) : 1;
+    int number_width = window->file ? count_digits(window->file->lines.count) : 1;
 
-  int color = 0;
+    int color = 0;
 
-  for (int j = 0; j < get_visible_line_count(window); j++) {
-    if (!redraw[window->region->y + j]) continue;
+    set_background_color(ColorBackground);
+    set_foreground_color(ColorForeground);
 
-    Line* line = window->file->lines.items[window->offset_y + j];
+    for (int j = 0; j < get_visible_line_count(window); j++) {
+      if (!redraw[window->region->y + j]) continue;
 
-    set_window_cursor(window, 0, j);
+      Line* line = window->file->lines.items[window->offset_y + j];
 
-    if (window->region->x) {
-      invert();
-      print(" ");
-      clear_formatting();
-      print(" ");
-    }
+      set_window_cursor(window, 0, j);
 
-    print("%*d", number_width, window->offset_y + j);
-    print("%*c", LinenumberMargin, ' ');
-
-    int size = max(min(line->chars.count - window->offset_x, width), 0);
-
-    for (int i = 0; i < size; i++) {
-      int index = window->offset_x + i;
-
-      if (line->colors.items[index] != color) {
-        color = line->colors.items[index];
-
-        if (color) {
-          set_foreground_color(ColorCodeGreen);
-        }
-        else {
-          clear_formatting();
-        }
+      if (window->region->x) {
+        invert();
+        print(" ");
+        clear_formatting();
+        print(" ");
       }
 
-      print("%c", line->chars.items[index]);
+      print("%*d", number_width, window->offset_y + j);
+      print("%*c", LinenumberMargin, ' ');
+
+      int size = max(min(line->chars.count - window->offset_x, width), 0);
+
+      for (int i = 0; i < size; i++) {
+        int index = window->offset_x + i;
+
+        if (line->colors.items[index] != color) {
+          color = line->colors.items[index];
+
+          if (color) {
+            set_foreground_color(ColorCodeGreen);
+          }
+          else {
+            set_foreground_color(ColorForeground);
+          }
+        }
+
+        print("%c", line->chars.items[index]);
+      }
+
+      if (color) {
+        //clear_formatting();
+        set_background_color(ColorBackground);
+        set_foreground_color(ColorForeground);
+      }
     }
 
-    if (color) {
-      clear_formatting();
+    for (int j = get_visible_line_count(window); j < height; j++) {
+      if (!redraw[window->region->y + j]) continue;
+      set_window_cursor(window, 0, j);
+      if (window->region->x) {
+        set_background_color(ColorBarBackground);
+        //invert();
+        print(" ");
+        set_background_color(ColorBackground);
+        //clear_formatting();
+        print(" ");
+      }
     }
   }
-
-  for (int j = get_visible_line_count(window); j < height; j++) {
-    if (!redraw[window->region->y + j]) continue;
-    set_window_cursor(window, 0, j);
-    if (window->region->x) {
-      invert();
-      print(" ");
-      clear_formatting();
-      print(" ");
-    }
-  }
-
-  // 
 
   render_status_bar(window);
 }
@@ -1718,7 +1777,7 @@ static void mark_lines_for_redraw() {
     Window* window = windows.items[i];
 
     // Redraw entire occupied region if either the window is moved or the file is dirty.
-    if (window->file == 0 || window->file->redraw || window->redraw) {
+    if (window->redraw || (window->file && window->file->redraw)) {
       window->redraw = false;
 
       for (int j = 0; j < window->region->height; j++) {
@@ -1764,6 +1823,8 @@ static void render() {
 
   mark_lines_for_redraw();
 
+  set_background_color(ColorBackground);
+
   for (int i = 0; i < master_region.height; i++) {
     if (redraw[i]) {
       clear_line(i);
@@ -1782,10 +1843,12 @@ static void render() {
   int cursor_y;
 
   if (window->bar_focused) {
+    set_cursor_color(ColorBarCursor);
     cursor_x = window->bar_cursor - window->bar_offset + get_left_bar_padding(window);
     cursor_y = window->region->height - 1;
   }
   else {
+    set_cursor_color(ColorNormalCursor);  // Todo: do this only when the mode changes.
     cursor_x = window->cursor_x - window->offset_x + get_left_padding(window);
     cursor_y = window->cursor_y - window->offset_y;
   }
@@ -1802,13 +1865,13 @@ static void resize_window(Window* window, int amount) {
 
   if (!parent) return;
 
-  int total = parent->stacked_layout ? parent->height : parent->width;
+  int total = parent->stacked ? parent->height : parent->width;
 
-  if (!window->region->stacked_layout) {
+  if (!window->region->stacked) {
     amount = amount * 2;
   }
 
-  parent->split_weight += (float)amount / total;
+  parent->split += (float)amount / total;
 
   resize_child_regions(parent);
 }
@@ -1825,10 +1888,10 @@ static void resize_child_regions(Region* region) {
   region->childs[0]->x = region->x;
   region->childs[0]->y = region->y;
 
-  if (region->stacked_layout) {
-    int height = limit(region->height * region->split_weight, MinimumWindowHeight, region->height - MinimumWindowHeight);
+  if (region->stacked) {
+    int height = limit(region->height * region->split, MinimumWindowHeight, region->height - MinimumWindowHeight);
 
-    region->split_weight = (float)height / region->height;
+    region->split = (float)height / region->height;
 
     region->childs[0]->width = region->width;
     region->childs[1]->width = region->width;
@@ -1840,9 +1903,9 @@ static void resize_child_regions(Region* region) {
     region->childs[1]->y = region->y + height;
   }
   else {
-    int width = limit(region->width * region->split_weight, MinimumWindowWidth, region->width - MinimumWindowWidth - 1);
+    int width = limit(region->width * region->split, MinimumWindowWidth, region->width - MinimumWindowWidth - 1);
 
-    region->split_weight = (float)width / region->width;
+    region->split = (float)width / region->width;
 
     region->childs[0]->height = region->height;
     region->childs[1]->height = region->height;
@@ -1967,8 +2030,8 @@ static Window* split_window(Window* window, bool vertical) {
   region->childs[0]->parent = region;
   region->childs[1]->parent = region;
 
-  region->split_weight = 0.5;
-  region->stacked_layout = vertical;
+  region->split = 0.5;
+  region->stacked = vertical;
 
   resize_child_regions(region);
   return region->childs[1]->window;
@@ -2042,7 +2105,7 @@ static void search(char* word, char* data) {
 
 //--------------------------------------------------------------------------------------------------
 
-static void window_resize_handler() {
+static void resize_master_region() {
   get_terminal_size(&master_region.width, &master_region.height);
   resize_child_regions(&master_region);
   render();
@@ -2051,6 +2114,9 @@ static void window_resize_handler() {
 //--------------------------------------------------------------------------------------------------
 
 static void terminal_deinit() {
+  reset_terminal_colors();
+  clear_terminal();
+  flush();
   tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved_terminal);
 }
 
@@ -2070,122 +2136,25 @@ static void terminal_init() {
 
   tcsetattr(STDIN_FILENO, TCSAFLUSH, &terminal);
 
-  signal(SIGWINCH, (void* )window_resize_handler);
+  signal(SIGWINCH, (void* )resize_master_region);
 }
 
 //--------------------------------------------------------------------------------------------------
 
 static void editor_init() {
-  char_array_init(&framebuffer, 64 * 1024);
-  window_array_init(&windows, 32);
-  file_array_init(&files, 32);
+  char_array_init(&framebuffer, 16 * 1024);
+  window_array_init(&windows, 16);
+  file_array_init(&files, 16);
 
   master_region.window = allocate_window();
   focused_window = master_region.window;
 
-  window_resize_handler();
-}
+  resize_master_region();
 
-//--------------------------------------------------------------------------------------------------
-
-static void command(const char* command, CharArray* data) {
-  const int max_buffer = 256;
-  char buffer[max_buffer];
-
-  FILE* stream = popen(command, "r");
-  if (stream) {
-    while (!feof(stream))
-      if (fgets(buffer, max_buffer, stream) != NULL) {
-        char* tmp = buffer;
-        while (*tmp) {
-          char_array_append(data, *tmp++);
-        }
-      }
-    pclose(stream);
-  }
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static IssueArray issues;
-
-//--------------------------------------------------------------------------------------------------
-
-static void compile_and_parse_issues() {
-  CharArray output = {0};
-  command("make test 2>&1", &output);
-  char_array_append(&output, 0);
-
-  // Memory leak!!!!!
-  issues.count = 0;
-
-  printf("Got output: %.*s\n", output.count, output.items);
-
-  char* data = output.items;
-  char* start = data;
-
-  while (1) {
-    skip_to_start_of_line(&data);
-
-    if (*data == 0) {
-      break;
-    }
-
-    start = data;
-
-    int line;
-    int column;
-
-    char* name;
-    int name_length;
-
-    char* ext;
-    int ext_length;
-
-    name = get_name(&data, &name_length);
-    if (!name_length) continue;
-
-    if (!skip_char(&data, '.')) continue;
-
-    ext = get_name(&data, &ext_length);
-    if (!ext_length) continue;
-
-    if (!skip_char(&data, ':')) continue;
-
-    if (!read_number(&data, &line)) continue;
-
-    if (!skip_char(&data, ':')) continue;
-
-    if (!read_number(&data, &column)) continue;
-
-    if (!skip_char(&data, ':')) continue;
-    skip_spaces(&data);
-
-    printf("Got error in %.*s . %.*s at line %d column %d\n", name_length, name, ext_length, ext, line, column);
-
-    Issue* issue = calloc(1, sizeof(Issue));
-
-    int message_size = 0;
-    while (data[message_size] && data[message_size] != '\n') message_size++;
-
-    issue->column = column;
-    issue->line = line;
-    issue->file = open_file(name, name_length + 1 + ext_length);
-    issue->message = data;
-    issue->message_size = message_size;
-
-    issue->file->issues = true;
-
-    issue_array_append(&issues, issue);
-  }
-
-  for (int i = 0; i < issues.count; i++) {
-    Issue* issue = issues.items[i];
-
-    printf("Got issue: %p\n", issue->file);
-  }
-
-  printf("Done\n");
+  set_cursor_color(ColorNormalCursor);
+  set_terminal_background_color(ColorBackground);
+  clear_terminal();
+  flush();
 }
 
 //--------------------------------------------------------------------------------------------------

@@ -13,18 +13,23 @@
 
 //--------------------------------------------------------------------------------------------------
 
-#define SpacesPerTab               2
-#define WindowCursorMarginTop      6
-#define WindowCursorMarginBottom   6
-#define WindowCursorMarginLeft     6
-#define WindowCursorMarginRight    6
-#define BarCursorMarginLeft        5
-#define BarCursorMarginRight       5
-#define LinenumberMargin           2
-#define StatusBarCount             1
-#define ErrorShowTime              1500
-#define MinimumWindowWidth         40
-#define MinimumWindowHeight        10
+#define SpacesPerTab 2
+
+#define WindowCursorMarginTop    6
+#define WindowCursorMarginBottom 6
+#define WindowCursorMarginLeft   6
+#define WindowCursorMarginRight  6
+
+#define BarCursorMarginLeft  5
+#define BarCursorMarginRight 5
+
+#define LinenumberMargin 2
+#define StatusBarCount   1
+
+#define ErrorShowTime 1500
+
+#define MinimumWindowWidth  40
+#define MinimumWindowHeight 10
 
 //--------------------------------------------------------------------------------------------------
 
@@ -40,6 +45,7 @@ typedef struct Line Line;
 typedef struct File File;
 typedef struct Window Window;
 typedef struct Region Region;
+typedef struct Issue Issue;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -47,6 +53,7 @@ define_array(char_array, CharArray, char);
 define_array(line_array, LineArray, Line* );
 define_array(file_array, FileArray, File* );
 define_array(window_array, WindowArray, Window* );
+define_array(issue_array, IssueArray, Issue*);
 
 //--------------------------------------------------------------------------------------------------
 
@@ -119,6 +126,13 @@ enum {
 //--------------------------------------------------------------------------------------------------
 
 enum {
+  ModeNormal,
+  ModeBar,
+};
+
+//--------------------------------------------------------------------------------------------------
+
+enum {
   UserKeyFocusNext     = KeyCodeShiftRight,
   UserKeyFocusPrevious = KeyCodeShiftLeft,
   UserKeyPageUp        = KeyCodeShiftUp,
@@ -128,7 +142,7 @@ enum {
   UserKeyNew           = KeyCodeCtrlN,
   UserKeySave          = KeyCodeCtrlS,
   UserKeyCommand       = KeyCodeCtrlR,
-  UserKeyFind          = KeyCodeCtrlD,
+  UserKeyCompile       = KeyCodeCtrlD,
   UserKeyMark          = KeyCodeCtrlB,
   UserKeyCopy          = KeyCodeCtrlC,
   UserKeyPaste         = KeyCodeCtrlV,
@@ -140,6 +154,7 @@ enum {
 struct Line {
   CharArray chars;
   CharArray colors;
+
   bool redraw;
 };
 
@@ -148,17 +163,20 @@ struct Line {
 struct File {
   CharArray path;
   LineArray lines;
+
   bool redraw;
   bool saved;
+  bool issues;
 };
 
 //--------------------------------------------------------------------------------------------------
 
 struct Region {
+  int x;
+  int y;
+
   int width;
   int height;
-  int position_x;
-  int position_y;
 
   float split_weight;
   bool stacked_layout;
@@ -170,22 +188,37 @@ struct Region {
 
 //--------------------------------------------------------------------------------------------------
 
+struct Issue {
+  File* file;
+
+  int line;
+  int column;
+  
+  char* message;
+  int message_size;//•
+};
+
+//--------------------------------------------------------------------------------------------------
+
 struct Window {
   File* file;
   Region* region;
 
-  int offset_x;
-  int offset_y;
-  int cursor_x;
-  int cursor_y;
-  int ideal_cursor_x;
-
-  int mark_x;
-  int mark_y;
-  bool mark;
-
   bool redraw;
 
+  int offset_x;
+  int offset_y;
+
+  int cursor_x;
+  int cursor_y;
+  int cursor_x_ideal;
+
+  bool mark_valid;
+  int mark_x;
+  int mark_y;
+
+
+  // Cleanup below this point.
   int bar_type;
   int bar_cursor;
   int bar_offset;
@@ -195,6 +228,14 @@ struct Window {
   Time error_time;
   bool error_active;
   CharArray error_message;
+
+  // Todo:
+
+  /*
+  bool mode; // either normal, command, open, etc.
+  */
+
+ // Remove the error timeout. Escape or any new command/character should do!
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -234,6 +275,7 @@ static void swap_windows(Window* window);
 static void focus_next();
 static void render_line(Line* line);
 static void focus_previous();
+static void compile_and_parse_issues();
 
 //--------------------------------------------------------------------------------------------------
 
@@ -304,7 +346,7 @@ static void set_cursor(int x, int y) {
 //--------------------------------------------------------------------------------------------------
 
 static void set_window_cursor(Window* window, int x, int y) {
-  set_cursor(window->region->position_x + x, window->region->position_y + y);
+  set_cursor(window->region->x + x, window->region->y + y);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -697,8 +739,8 @@ static int count_digits(int number) {
 //--------------------------------------------------------------------------------------------------
 
 static int get_left_padding(Window* window) {
-  if (window->file == 0) return LinenumberMargin + 1; 
-  return count_digits(window->file->lines.count) + LinenumberMargin;
+  if (window->file == 0) return LinenumberMargin + 1;
+  return count_digits(window->file->lines.count) + LinenumberMargin + (window->file->issues == true);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -710,7 +752,7 @@ static int get_left_bar_padding(Window* window) {
 //--------------------------------------------------------------------------------------------------
 
 static void get_active_size(Window* window, int* width, int* height) {
-  int x = window->region->position_x ? 2 : 0;
+  int x = window->region->x ? 2 : 0;
   *width  = window->region->width - get_left_padding(window) - x;
   *height = window->region->height - StatusBarCount;
 }
@@ -775,7 +817,7 @@ static void limit_window_cursor(Window* window) {
 
 static void update_window_cursor_x(Window* window, int x) {
   window->cursor_x = x;
-  window->ideal_cursor_x = x;
+  window->cursor_x_ideal = x;
   limit_window_cursor(window);
 }
 
@@ -783,8 +825,17 @@ static void update_window_cursor_x(Window* window, int x) {
 
 static void update_window_cursor_y(Window* window, int y) {
   window->cursor_y = y;
-  window->cursor_x = window->ideal_cursor_x;
+  window->cursor_x = window->cursor_x_ideal;
   limit_window_cursor(window);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void update_window_offset_y(Window* window, int offset) {
+  if (!window->file) return;
+
+  window->offset_y = limit(offset, 0, window->file->lines.count);
+  window->redraw = true;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -811,7 +862,7 @@ static void append_spaces(Line* line, int count) {
 
 //--------------------------------------------------------------------------------------------------
 
-static void file_insert_chars(Window* window, char* data, int size) {
+static void file_insert_chars(Window* window, char* data, int size, bool smart) {
   static CharArray buffer = {0};
 
   Line* line = window->file->lines.items[window->cursor_y];
@@ -836,7 +887,7 @@ static void file_insert_chars(Window* window, char* data, int size) {
   render_line(line);
 
   // Smart indentation.
-  if (size == 1 && data[0] == '\n') {
+  if (smart && size == 1 && data[0] == '\n') {
     Line* previous_line = window->file->lines.items[window->cursor_y - 1];
     int spaces = get_leading_spaces(previous_line);
 
@@ -859,8 +910,8 @@ static void file_insert_chars(Window* window, char* data, int size) {
 
 //--------------------------------------------------------------------------------------------------
 
-static void file_insert_char(Window* window, char c) {
-  file_insert_chars(window, &c, 1);
+static void file_insert_char(Window* window, char c, bool smart) {
+  file_insert_chars(window, &c, 1, smart);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -939,7 +990,7 @@ static int get_delete_count(Window* window, bool delete_word) {
   }
 
   if (leading) {
-    return (space_count % SpacesPerTab) ? SpacesPerTab : 1;
+    return ((space_count % SpacesPerTab) == 0) ? SpacesPerTab : 1;
   }
 
   return 1;
@@ -976,6 +1027,7 @@ static void copy_region(Window* window, int start_x, int start_y, int end_x, int
   }
 
   Line* line = window->file->lines.items[start_y];
+  debug_print("startx = %d endx = %d\n", start_x, end_x);
   for (int i = start_x; i < end_x; i++) {
     char_array_append(&clipboard, line->chars.items[i]);
   }
@@ -996,14 +1048,6 @@ static void copy_region(Window* window, int start_x, int start_y, int end_x, int
 
 static void delete_region(Window* window, int start_x, int start_y, int end_x, int end_y) {
   if (!window->file) return;
-
-  debug_print("Delete region\n");
-
-  //     |
-  // aoesntaosn aho
-  // aoesnut aohesuntaho esuntaoh eusnaoh
-  // asoetuha oesnuthao esnuh aosneuhsna
-  //   |
 
   window->file->redraw = true;
 
@@ -1028,17 +1072,19 @@ static void delete_region(Window* window, int start_x, int start_y, int end_x, i
   Line* end = window->file->lines.items[start_y + 1];
 
   start->chars.count = start_x;
-  char_array_append_multiple(&start->chars, end->chars.items, end_x);
+  char_array_append_multiple(&start->chars, end->chars.items + end_x, end->chars.count - end_x);
   
   while (end_x--) {
     char_array_remove(&end->chars, 0);
   }
+  end->redraw = true;
+  window->redraw = true;
 }
 
 //--------------------------------------------------------------------------------------------------
 
 static void handle_copy(Window* window) {
-  if (!window->file || !window->mark) {
+  if (!window->file || !window->mark_valid) {
     error(window, "copy error");
     return;
   }
@@ -1048,6 +1094,7 @@ static void handle_copy(Window* window) {
   int end_x = window->cursor_x;
   int end_y = window->cursor_y;
 
+  // Wrong!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Fix!!!!!!!!!!!!!!!!!!!
   if (window->cursor_y < window->mark_y || (window->cursor_y == window->mark_y && window->cursor_x < window->mark_y)) {
     start_x = window->cursor_x;
     start_y = window->cursor_y;
@@ -1062,7 +1109,7 @@ static void handle_copy(Window* window) {
 //--------------------------------------------------------------------------------------------------
 
 static void handle_cut(Window* window) {
-  if (!window->file || !window->mark) {
+  if (!window->file || !window->mark_valid) {
     error(window, "cut error");
     return;
   }
@@ -1096,15 +1143,21 @@ static void handle_paste(Window* window) {
   }
 
   for (int i = 0; i < clipboard.count; i++) {
-    file_insert_char(window, clipboard.items[i]);
+    file_insert_char(window, clipboard.items[i], false);
   }
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void compile() {
+  compile_and_parse_issues();
 }
 
 //--------------------------------------------------------------------------------------------------
 
 static void editor_handle_keypress(Window* window, int keycode) {
   if (window->file && KeyCodePrintableStart <= keycode && keycode <= KeyCodePrintableEnd) {
-    file_insert_char(window, keycode);
+    file_insert_char(window, keycode, true);
     window->file->saved = false;
   }
   else switch (keycode) {
@@ -1118,10 +1171,12 @@ static void editor_handle_keypress(Window* window, int keycode) {
 
     case UserKeyPageUp:
       update_window_cursor_y(window, window->cursor_y - window->region->height / 2);
+      update_window_offset_y(window, window->offset_y - window->region->height / 2);
       break;
 
     case UserKeyPageDown:
       update_window_cursor_y(window, window->cursor_y + window->region->height / 2);
+      update_window_offset_y(window, window->offset_y + window->region->height / 2);
       break;
 
     case KeyCodeShiftHome:
@@ -1176,18 +1231,22 @@ static void editor_handle_keypress(Window* window, int keycode) {
       handle_delete(window, false);
       break;
 
+    case UserKeyCompile:
+      compile();
+      break;
+
     case KeyCodeTab:
       if (!window->file) break;
       window->file->saved = false;
       for (int i = 0; i < SpacesPerTab; i++) {
-        file_insert_char(window, ' ');
+        file_insert_char(window, ' ', true);
       }
       break;
 
     case KeyCodeEnter:
       if (!window->file) break;
       window->file->saved = false;
-      file_insert_char(window, '\n');
+      file_insert_char(window, '\n', true);
       break;
     
     case UserKeyFocusNext:
@@ -1215,7 +1274,7 @@ static void editor_handle_keypress(Window* window, int keycode) {
       break;
     
     case UserKeyMark:
-      window->mark = !window->mark;
+      window->mark_valid = true;
       window->mark_x = window->cursor_x;
       window->mark_y = window->cursor_y;
       break;
@@ -1256,8 +1315,8 @@ static void change_file(Window* window, File* file) {
   window->cursor_y = 0;
   window->offset_x = 0;
   window->offset_y = 0;
-  window->ideal_cursor_x = 0;
-  window->mark = false;
+  window->cursor_x_ideal = 0;
+  window->mark_valid = false;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1274,6 +1333,18 @@ static void skip_spaces(char** data) {
 
 //--------------------------------------------------------------------------------------------------
 
+static void skip_to_start_of_line(char** data) {
+  char* tmp = *data;
+
+  while (*tmp && *tmp != '\n') {
+    tmp++;
+  }
+
+  *data = ++tmp;
+}
+
+//--------------------------------------------------------------------------------------------------
+
 static bool skip_keyword(char** data, char* keyword) {
   skip_spaces(data);
 
@@ -1285,6 +1356,24 @@ static bool skip_keyword(char** data, char* keyword) {
   }
 
   return false;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static char* get_name(char** data, int* size) {
+  skip_spaces(data);
+
+  char* tmp = *data;
+  char* start = tmp;
+
+  while (*tmp && is_letter_or_number(*tmp)) {  // Note: will accept names which start with numbers.
+    tmp++;
+  }
+
+  *size = tmp - start;
+  *data = tmp;
+
+  return start;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1520,7 +1609,7 @@ static void render_status_bar(Window* window) {
         size++;
       }
 
-      if (window->mark) {
+      if (window->mark_valid) {
         size += 3;
       }
     }
@@ -1536,7 +1625,7 @@ static void render_status_bar(Window* window) {
       print(" ");
     }
 
-    if (window->mark) {
+    if (window->mark_valid) {
       print("[] ");
     }
 
@@ -1564,13 +1653,13 @@ static void render_window(Window* window) {
   int color = 0;
 
   for (int j = 0; j < get_visible_line_count(window); j++) {
-    if (!redraw[window->region->position_y + j]) continue;
+    if (!redraw[window->region->y + j]) continue;
 
     Line* line = window->file->lines.items[window->offset_y + j];
 
     set_window_cursor(window, 0, j);
 
-    if (window->region->position_x) {
+    if (window->region->x) {
       invert();
       print(" ");
       clear_formatting();
@@ -1605,9 +1694,9 @@ static void render_window(Window* window) {
   }
 
   for (int j = get_visible_line_count(window); j < height; j++) {
-    if (!redraw[window->region->position_y + j]) continue;
+    if (!redraw[window->region->y + j]) continue;
     set_window_cursor(window, 0, j);
-    if (window->region->position_x) {
+    if (window->region->x) {
       invert();
       print(" ");
       clear_formatting();
@@ -1633,7 +1722,7 @@ static void mark_lines_for_redraw() {
       window->redraw = false;
 
       for (int j = 0; j < window->region->height; j++) {
-        redraw[window->region->position_y + j] = true;
+        redraw[window->region->y + j] = true;
       }
     }
 
@@ -1641,14 +1730,14 @@ static void mark_lines_for_redraw() {
     if (window->file) {
       for (int j = 0; j < get_visible_line_count(window); j++) {
         if (window->file->lines.items[window->offset_y + j]->redraw) {
-          redraw[window->region->position_y + j] = true;
+          redraw[window->region->y + j] = true;
         }
       }
     }
 
     // Redraw status bars.
     for (int j = 0; j < StatusBarCount; j++) {
-      redraw[window->region->position_y + window->region->height - j - 1] = true;
+      redraw[window->region->y + window->region->height - j - 1] = true;
     }
   }
 
@@ -1733,8 +1822,8 @@ static void resize_child_regions(Region* region) {
     return;
   }
 
-  region->childs[0]->position_x = region->position_x;
-  region->childs[0]->position_y = region->position_y;
+  region->childs[0]->x = region->x;
+  region->childs[0]->y = region->y;
 
   if (region->stacked_layout) {
     int height = limit(region->height * region->split_weight, MinimumWindowHeight, region->height - MinimumWindowHeight);
@@ -1747,8 +1836,8 @@ static void resize_child_regions(Region* region) {
     region->childs[0]->height = height;
     region->childs[1]->height = region->height - height;
 
-    region->childs[1]->position_x = region->position_x;
-    region->childs[1]->position_y = region->position_y + height;
+    region->childs[1]->x = region->x;
+    region->childs[1]->y = region->y + height;
   }
   else {
     int width = limit(region->width * region->split_weight, MinimumWindowWidth, region->width - MinimumWindowWidth - 1);
@@ -1761,8 +1850,8 @@ static void resize_child_regions(Region* region) {
     region->childs[0]->width = width;
     region->childs[1]->width = region->width - width - 1; // Split line.
 
-    region->childs[1]->position_x = region->position_x + width;
-    region->childs[1]->position_y = region->position_y;
+    region->childs[1]->x = region->x + width;
+    region->childs[1]->y = region->y;
   }
 
   resize_child_regions(region->childs[0]);
@@ -1925,7 +2014,7 @@ static void search(char* word, char* data) {
   int count = 0;
   int indices[1024];
 
-  make_lookup_tables(word, word_size);
+  make_search_lookup(word, word_size);
 
   while (data_index < data_size) {
     int tmp_data_index = data_index;
@@ -1999,11 +2088,109 @@ static void editor_init() {
 
 //--------------------------------------------------------------------------------------------------
 
+static void command(const char* command, CharArray* data) {
+  const int max_buffer = 256;
+  char buffer[max_buffer];
+
+  FILE* stream = popen(command, "r");
+  if (stream) {
+    while (!feof(stream))
+      if (fgets(buffer, max_buffer, stream) != NULL) {
+        char* tmp = buffer;
+        while (*tmp) {
+          char_array_append(data, *tmp++);
+        }
+      }
+    pclose(stream);
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static IssueArray issues;
+
+//--------------------------------------------------------------------------------------------------
+
+static void compile_and_parse_issues() {
+  CharArray output = {0};
+  command("make test 2>&1", &output);
+  char_array_append(&output, 0);
+
+  // Memory leak!!!!!
+  issues.count = 0;
+
+  printf("Got output: %.*s\n", output.count, output.items);
+
+  char* data = output.items;
+  char* start = data;
+
+  while (1) {
+    skip_to_start_of_line(&data);
+
+    if (*data == 0) {
+      break;
+    }
+
+    start = data;
+
+    int line;
+    int column;
+
+    char* name;
+    int name_length;
+
+    char* ext;
+    int ext_length;
+
+    name = get_name(&data, &name_length);
+    if (!name_length) continue;
+
+    if (!skip_char(&data, '.')) continue;
+
+    ext = get_name(&data, &ext_length);
+    if (!ext_length) continue;
+
+    if (!skip_char(&data, ':')) continue;
+
+    if (!read_number(&data, &line)) continue;
+
+    if (!skip_char(&data, ':')) continue;
+
+    if (!read_number(&data, &column)) continue;
+
+    if (!skip_char(&data, ':')) continue;
+    skip_spaces(&data);
+
+    printf("Got error in %.*s . %.*s at line %d column %d\n", name_length, name, ext_length, ext, line, column);
+
+    Issue* issue = calloc(1, sizeof(Issue));
+
+    int message_size = 0;
+    while (data[message_size] && data[message_size] != '\n') message_size++;
+
+    issue->column = column;
+    issue->line = line;
+    issue->file = open_file(name, name_length + 1 + ext_length);
+    issue->message = data;
+    issue->message_size = message_size;
+
+    issue->file->issues = true;
+
+    issue_array_append(&issues, issue);
+  }
+
+  for (int i = 0; i < issues.count; i++) {
+    Issue* issue = issues.items[i];
+
+    printf("Got issue: %p\n", issue->file);
+  }
+
+  printf("Done\n");
+}
+
+//--------------------------------------------------------------------------------------------------
+
 int main() {
-
-
-  return 0;
-
   terminal_init();
   editor_init();
 

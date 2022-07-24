@@ -19,6 +19,8 @@ enum {
 
   MaxEventHistorySize      = 1024,
   MaxKeywordSize           = 32,
+  MaxFindLength            = 1024,
+  MaxLineLength            = 1024, // Has to do with the find.
 
   MinibarMaxPathWidth      = 20,
   MinibarCommandPadding    = 1,
@@ -81,9 +83,9 @@ static const struct { const char* name; int colors[ColorTypeCount]; } themes[Col
       [ColorTypeMinibarForeground]       = 0xfdf6e3,
       [ColorTypeMinibarBackground]       = 0x93a1a1,
       [ColorTypeMinibarError]            = 0xdc322f,
-      [ColorTypeSelectedMatchForeground] = 0x082626,
-      [ColorTypeSelectedMatchBackground] = 0xd1b897,
-      [ColorTypeMatchForeground]         = 0xd1b897,
+      [ColorTypeSelectedMatchForeground] = 0xff0000,
+      [ColorTypeSelectedMatchBackground] = 0x00ff00,
+      [ColorTypeMatchForeground]         = 0x000000,
       [ColorTypeMatchBackground]         = 0x0a3f4a,
       [ColorTypeComment]                 = 0x44b340,
       [ColorTypeMultilineComment]        = 0xff0000,
@@ -223,23 +225,31 @@ typedef struct Region Region;
 typedef struct Action Action;
 typedef struct Highlight Highlight;
 typedef struct FileState FileState;
+typedef struct Match Match;
 
 //--------------------------------------------------------------------------------------------------
 
-typedef struct { int x, y; } Position;
+// C must know the size fore the array stuff.
+struct Match {
+  int x;
+  int y; 
+};
 
-define_array(char_array, CharArray, char);
+//--------------------------------------------------------------------------------------------------
+
+define_array(string, String, char);
 define_array(line_array, LineArray, Line* );
 define_array(file_array, FileArray, File* );
 define_array(window_array, WindowArray, Window* );
-define_array(position_array, PositionArray, Position);
+define_array(match_array, MatchArray, Match);
 define_array(file_state_array, FileStateArray, FileState* );
+define_array(int_array, IntArray, int);
 
 //--------------------------------------------------------------------------------------------------
 
 struct Line {
-  CharArray chars;
-  CharArray colors;
+  String chars;
+  IntArray colors;
 
   bool redraw;
 };
@@ -292,7 +302,7 @@ enum {
 static char* c_keywords_2[] = {"if", 0};
 static char* c_keywords_3[] = {"int", "for", 0};
 static char* c_keywords_4[] = {"case", "else", "true", "char", "void", "bool", 0};
-static char* c_keywords_5[] = {"float", "break", "false", 0};
+static char* c_keywords_5[] = {"float", "break", "false", "while", 0};
 static char* c_keywords_6[] = {"static", "struct", "return", 0};
 
 //--------------------------------------------------------------------------------------------------
@@ -324,7 +334,7 @@ static Highlight highlights[LanguageCount] = {
 //--------------------------------------------------------------------------------------------------
 
 struct File {
-  CharArray path;
+  String path;
   LineArray lines;
 
   bool redraw;
@@ -404,12 +414,12 @@ struct Window {
   int minibar_cursor;
   int minibar_offset;
   bool minibar_active;
-  CharArray minibar_data;
+  String minibar_data;
 
   bool error_present;
-  CharArray error_message;
+  String error_message;
 
-  PositionArray matches;
+  MatchArray matches;
   int match_index;
   int match_length;
 
@@ -422,17 +432,24 @@ struct Window {
 //--------------------------------------------------------------------------------------------------
 
 static Termios saved_terminal;
-static CharArray framebuffer;
+static String framebuffer;
 static Window* focused_window;
 static Region master_region;
 static WindowArray windows;
 static FileArray files;
-static CharArray clipboard;
-static CharArray buffer;
+static String clipboard;
+static String buffer;
+
+static int find_char_lookup[256];
+static int find_index_lookup[MaxFindLength];
+static int find_indicies[MaxLineLength];
 
 static bool redraw_line[1024];
 static bool running = true;
 static int current_theme = ColorThemeJonBlow;
+
+int current_foreground_type = -1;
+int current_background_type = -1;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -446,10 +463,10 @@ static void swap_windows(Window* window);
 static void focus_next();
 static void focus_previous();
 static void compile_and_parse_issues();
-static void make_search_lookup(char* data, int size);
-static int search(char* word, int word_length, char* data, int data_length, int* indices);
+static void make_find_lookup(char* data, int size);
+static int find(char* word, int word_length, char* data, int data_length);
 static void render_line(File* file, Line* line);
-static int get_delete_count(Window* window, bool delete_word);
+static int get_delete_count(Window* window, char* data, int cursor, bool ctrl);
 static void render_line(File* file, Line* line);
 static void change_file(Window* window, File* file);
 
@@ -464,7 +481,7 @@ static void debug(const char* data, ...) {
   va_end(arguments);
 
   // Run tty in a remote terminal to get the path.
-  FILE* fd = fopen("/dev/pts/1", "w");
+  FILE* fd = fopen("/dev/pts/0", "w");
   assert(fd > 0);
 
   fwrite(buffer, 1, size, fd);
@@ -474,7 +491,7 @@ static void debug(const char* data, ...) {
 //--------------------------------------------------------------------------------------------------
 
 static int print(const char* data, ...) {
-  char_array_extend(&framebuffer, framebuffer.count + 1024);
+  string_extend(&framebuffer, framebuffer.count + 1024);
 
   va_list arguments;
   va_start(arguments, data);
@@ -582,7 +599,7 @@ static void update_terminal_background() {
 
 static void set_cursor_color(int type) {
   int color = themes[current_theme].colors[type];
-  print("\x1b]12;rgb:%x/%x/%x\x7", (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
+  print("\x1b]12;rgb:%02x/%02x/%02x\x7", (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -602,14 +619,21 @@ static void reset_terminal_colors() {
 //--------------------------------------------------------------------------------------------------
 
 static void set_background_color(int type) {
+  if (type == current_background_type) return;
   int color = themes[current_theme].colors[type];
+  current_background_type = color;
   print("\x1b[48;2;%d;%d;%dm", (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
 }
 
 //--------------------------------------------------------------------------------------------------
 
 static void set_foreground_color(int type) {
+  if (type == current_foreground_type) return;
   int color = themes[current_theme].colors[type];
+  if (color == 0) {
+    color = 0xff0000;
+  }
+  current_foreground_type = type;
   print("\x1b[38;2;%d;%d;%dm", (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
 }
 
@@ -622,7 +646,23 @@ static void bold() {
 //--------------------------------------------------------------------------------------------------
 
 static void clear_formatting() {
+  current_background_type = -1;
+  current_foreground_type = -1;
   print("\x1b[0m");
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static bool input_is_pending() {
+  fd_set set;
+  FD_ZERO(&set);
+  FD_SET(STDIN_FILENO, &set);
+
+  struct timeval timeout;
+  timeout.tv_sec = 0;
+  timeout.tv_usec = 0;
+
+  return select(1, &set, 0, 0, &timeout) == 1;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -689,8 +729,8 @@ static int get_input() {
 //--------------------------------------------------------------------------------------------------
 
 static void display_error(Window* window, char* message, ...) {
-  char_array_clear(&window->error_message);
-  char_array_extend(&window->error_message, 1024);
+  string_clear(&window->error_message);
+  string_extend(&window->error_message, 1024);
 
   va_list arguments;
   va_start(arguments, message);
@@ -703,8 +743,8 @@ static void display_error(Window* window, char* message, ...) {
 
 //--------------------------------------------------------------------------------------------------
 
-static void add_null_termination(CharArray* array) {
-  char_array_append(array, 0);
+static void add_null_termination(String* array) {
+  string_append(array, 0);
   array->count--;
 }
 
@@ -736,7 +776,7 @@ static File* allocate_file(char* path, int path_size) {
   File* file = calloc(1, sizeof(File));
   file_array_append(&files, file);
 
-  char_array_append_multiple(&file->path, path, path_size);
+  string_append_multiple(&file->path, path, path_size);
   add_null_termination(&file->path);
 
   // Load the correct highlighting to the file.
@@ -768,14 +808,14 @@ static void delete_file(File* file) {
     delete_line(file, 0);
   }
 
-  line_array_delete(&file->lines);
+ line_array_delete(&file->lines);
   free(file);
 }
 
 //--------------------------------------------------------------------------------------------------
 
 static void insert_lines(File* file, int index, int count) {
-  line_array_allocate_insert_multiple(&file->lines, count, index);
+ line_array_allocate_insert_multiple(&file->lines, count, index);
 
   for (int i = 0; i < count; i++) {
     file->lines.items[index + i] = calloc(1, sizeof(Line));
@@ -796,11 +836,11 @@ static Line* insert_line(File* file, int index) {
 static void delete_lines(File* file, int index, int count) {
   for (int i = 0; i < count; i++) {
     Line* line = file->lines.items[index + i];
-    char_array_delete(&line->chars);
+    string_delete(&line->chars);
     free(line);
   }
 
-  line_array_remove_multiple(&file->lines, index, count);
+ line_array_remove_multiple(&file->lines, index, count);
   file->redraw = true;
 }
 
@@ -864,7 +904,7 @@ static File* open_file(char* path, int path_size) {
 
   file = allocate_file(path, path_size);
 
-  line_array_extend(&file->lines, line_count);
+ line_array_extend(&file->lines, line_count);
   Line* line = insert_line(file, 0);
 
   cr = 0;
@@ -872,7 +912,7 @@ static File* open_file(char* path, int path_size) {
 
   for (int i = 0; i < size; i++) {
     if (data[i] == '\n') {
-      char_array_append_multiple(&line->chars, &data[index], i - index - cr);
+      string_append_multiple(&line->chars, &data[index], i - index - cr);
       render_line(file, line);
 
       line = insert_line(file, file->lines.count);
@@ -886,7 +926,7 @@ static File* open_file(char* path, int path_size) {
 
   if (index < size) {
     Line* line = insert_line(file, file->lines.count);
-    char_array_append_multiple(&line->chars, &data[index], size - index - cr);
+    string_append_multiple(&line->chars, &data[index], size - index - cr);
     render_line(file, line);
   }
 
@@ -1024,7 +1064,7 @@ static bool is_indentifier_literal(char c) {
 
 static int get_left_padding(Window* window) {
   int vertical_window_separator_width = (window->region->x) ? 2 : 0;
-  int line_number_width = (window->file) ? count_digits(window->file->lines.count) : 0;
+  int line_number_width = (window->file) ? count_digits(window->file->lines.count - 1) : 0;
   int margin = EditorLineNumberMargin;
 
   return vertical_window_separator_width + line_number_width + margin;
@@ -1123,7 +1163,7 @@ static void insert_character(Window* window, char c) {
   File* file = window->file;
   Line* line = file->lines.items[window->cursor_y];
 
-  char_array_insert(&line->chars, c, window->cursor_x++);
+  string_insert(&line->chars, c, window->cursor_x++);
   render_line(file, line);
 
   file->saved = false;
@@ -1133,7 +1173,7 @@ static void insert_character(Window* window, char c) {
 
 static void append_spaces(Line* line, int count) {
   while (count--) {
-    char_array_append(&line->chars, ' ');
+    string_append(&line->chars, ' ');
   }
 }
 
@@ -1160,7 +1200,7 @@ static void insert_newline(Window* window) {
   char* tail = &line->chars.items[window->cursor_x];
   int tail_size = line->chars.count - window->cursor_x;
   
-  char_array_truncate(&line->chars, window->cursor_x);
+  string_truncate(&line->chars, window->cursor_x);
   render_line(file, line);
 
   int indent = get_leading_spaces(line);
@@ -1170,7 +1210,7 @@ static void insert_newline(Window* window) {
       line = insert_line(file, window->cursor_y + 1);
 
       append_spaces(line, indent);
-      char_array_append(&line->chars, '}');
+      string_append(&line->chars, '}');
       render_line(file, line);
     }
 
@@ -1180,7 +1220,7 @@ static void insert_newline(Window* window) {
   line = insert_line(file, window->cursor_y + 1);
 
   append_spaces(line, indent);
-  char_array_append_multiple(&line->chars, tail, tail_size);
+  string_append_multiple(&line->chars, tail, tail_size);
   render_line(file, line);
 
   window->cursor_x = indent;
@@ -1196,7 +1236,7 @@ static void delete_character(Window* window) {
   Line* line = file->lines.items[window->cursor_y];
 
   if (window->cursor_x) {
-    char_array_remove(&line->chars, window->cursor_x - 1);
+    string_remove(&line->chars, window->cursor_x - 1);
     update_window_cursor_x(window, window->cursor_x - 1);
     render_line(file, line);
   }
@@ -1206,7 +1246,7 @@ static void delete_character(Window* window) {
     update_window_cursor_x(window, prev_line->chars.count);
     update_window_cursor_y(window, window->cursor_y - 1);
 
-    char_array_append_multiple(&prev_line->chars, line->chars.items, line->chars.count);
+    string_append_multiple(&prev_line->chars, line->chars.items, line->chars.count);
     render_line(file, prev_line);
 
     delete_line(window->file, window->cursor_y + 1);
@@ -1217,19 +1257,14 @@ static void delete_character(Window* window) {
 
 //--------------------------------------------------------------------------------------------------
 
-static int get_delete_count(Window* window, bool ctrl) {
-  File* file = window->file;
-  Line* line = file->lines.items[window->cursor_y];
-
-  char* data = line->chars.items;
-  int size = window->cursor_x;
-  if (!size) return 1;
+static int get_delete_count(Window* window, char* data, int cursor, bool ctrl) {
+  if (!cursor) return 1;
 
   int space_count = 0;
   int other_count = 0;
   int char_count = 0;
 
-  for (int i = 0; i < size; i++) {
+  for (int i = 0; i < cursor; i++) {
     if (data[i] == ' ') {
       if (space_count == 2) {
         char_count = 0;
@@ -1273,7 +1308,9 @@ static int get_delete_count(Window* window, bool ctrl) {
 //--------------------------------------------------------------------------------------------------
 
 static void delete_character_or_word(Window* window, bool ctrl) {
-  int count = get_delete_count(window, ctrl);
+  File* file = window->file;
+  Line* line = file->lines.items[window->cursor_y];
+  int count = get_delete_count(window, line->chars.items, window->cursor_x, ctrl);
   while (count--) {
     delete_character(window);
   }
@@ -1304,9 +1341,9 @@ static void insert_block(Window* window, char* data, int size) {
   File* file = window->file;
   Line* line = file->lines.items[window->cursor_y];
 
-  char_array_clear(&buffer);
-  char_array_append_multiple(&buffer, &line->chars.items[window->cursor_x], line->chars.count - window->cursor_x);
-  char_array_truncate(&line->chars, window->cursor_x);
+  string_clear(&buffer);
+  string_append_multiple(&buffer, &line->chars.items[window->cursor_x], line->chars.count - window->cursor_x);
+  string_truncate(&line->chars, window->cursor_x);
 
   int line_count = 0;
   for (int i = 0; i < size; i++) {
@@ -1325,7 +1362,7 @@ static void insert_block(Window* window, char* data, int size) {
       index++;
     }
 
-    char_array_append_multiple(&line->chars, &data[start], index - start);
+    string_append_multiple(&line->chars, &data[start], index - start);
     render_line(file, line);
 
     if (index >= size) break;
@@ -1340,7 +1377,7 @@ static void insert_block(Window* window, char* data, int size) {
   update_window_cursor_x(window, line->chars.count);
 
   if (buffer.count) {
-    char_array_append_multiple(&line->chars, buffer.items, buffer.count);
+    string_append_multiple(&line->chars, buffer.items, buffer.count);
     render_line(file, line);
   }
 }
@@ -1354,14 +1391,14 @@ static void delete_block(Window* window) {
   File* file = window->file;
   Line* line = file->lines.items[start_y];
 
-  char_array_clear(&buffer);
-  char_array_append_multiple(&buffer, line->chars.items, start_x);
+  string_clear(&buffer);
+  string_append_multiple(&buffer, line->chars.items, start_x);
 
   delete_lines(file, start_y, end_y - start_y);
   line = file->lines.items[start_y];
 
-  char_array_remove_multiple(&line->chars, 0, end_x);
-  char_array_insert_multiple(&line->chars, buffer.items, buffer.count, 0);
+  string_remove_multiple(&line->chars, 0, end_x);
+  string_insert_multiple(&line->chars, buffer.items, buffer.count, 0);
   
   update_window_cursor_x(window, buffer.count);
   update_window_cursor_y(window, start_y);
@@ -1375,21 +1412,21 @@ static void copy_block(Window* window) {
   int start_x, start_y, end_x, end_y;
   get_block_marks(window, &start_x, &start_y, &end_x, &end_y);
 
-  char_array_clear(&clipboard);
+  string_clear(&clipboard);
 
   File* file = window->file;
   Line* line = file->lines.items[start_y];
 
   while (start_y != end_y) {
-    char_array_append_multiple(&clipboard, &line->chars.items[start_x], line->chars.count - start_x);
-    char_array_append(&clipboard, '\n');
+    string_append_multiple(&clipboard, &line->chars.items[start_x], line->chars.count - start_x);
+    string_append(&clipboard, '\n');
     render_line(file, line);
 
     line = file->lines.items[++start_y];
     start_x = 0;
   }
 
-  char_array_append_multiple(&clipboard, &line->chars.items[start_x], end_x - start_x);
+  string_append_multiple(&clipboard, &line->chars.items[start_x], end_x - start_x);
   render_line(file, line);
 }
 
@@ -1423,6 +1460,17 @@ static void enter_minibar_mode(Window* window, int mode) {
     window->saved_cursor_x = window->cursor_x;
     window->saved_cursor_y = window->cursor_y;
   }
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void exit_minibar_mode(Window* window) {
+  string_clear(&window->minibar_data);
+  match_array_clear(&window->matches);
+
+  window->minibar_active = false;
+  window->minibar_cursor = 0;
+  window->minibar_offset = 0;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1584,8 +1632,146 @@ static void editor_handle_keypress(Window* window, int keycode) {
       }
   }
 
-  limit_window_cursor(window);
+  if (window->file) {
+    limit_window_cursor(window);
+  }
 }
+
+//--------------------------------------------------------------------------------------------------
+
+// The find algorithm is based on Boyer–Moore. It is much slower than VScode when searching files
+// which are 100k+ lines. It is actually really slow... maybe something is wrong.
+static void make_find_lookup(char* data, int size) {
+  for (int i = 0; i < 256; i++) {
+    find_char_lookup[i] = size;
+  }
+
+  for (int i = 0; i < size; i++) {
+    find_char_lookup[(int)data[i]] = size - i - 1;
+  }
+
+  for (int i = size - 1; i > 0; i--) {
+    int shift = 0;
+    for (int j = i - 1; j >= 0; j--) {
+      if (!strncmp(data + j, data + i, size - i)) {
+        if ((j && data[j] != data[i - 1]) || !shift) {
+          shift = i - j;
+        }
+      }
+    }
+
+    find_index_lookup[i] = shift ? shift : 1;
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static int find(char* word, int word_length, char* data, int data_length) {
+  int data_index = word_length - 1;
+  int matches = 0;
+
+  while (data_index < data_length) {
+    int tmp_data_index = data_index;
+    int word_index = word_length - 1;
+    int match_count = 0;
+
+    while (word_index >= 0 && word[word_index] == data[data_index]) {
+      word_index--;
+      data_index--;
+      match_count++;
+    }
+
+    if (word_index < 0) {
+      find_indicies[matches++] = data_index + 1;
+      data_index += word_length + 1;
+      continue;
+    }
+
+    int skip = match_count ? find_index_lookup[match_count] : find_char_lookup[(int)data[data_index]];
+    data_index = tmp_data_index + skip;
+  }
+
+  return matches;
+}
+
+
+//--------------------------------------------------------------------------------------------------
+
+// @Improve!
+static void set_cursor_based_on_position(Window* window) {
+  Match* position = &window->matches.items[window->match_index];
+
+  int width, height;
+  get_active_size(window, &width, &height);
+
+  if (position->y >= window->offset_y + height - EditorCursorMarginBottom) {
+    window->offset_y = 999999;
+  }
+
+  window->cursor_y = position->y;
+  window->cursor_x = position->x;
+
+  window->redraw = true;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void find_in_file(Window* window) {
+  File* file = window->file;
+
+  char* data = window->minibar_data.items;
+  int size = window->minibar_data.count;
+
+  int total_matches = 0;
+  bool interrupted = false;
+
+  make_find_lookup(data, size);
+  match_array_clear(&window->matches);
+
+  if (!size) {
+    // @Hack: force clear markings.
+    window->redraw = true;
+    return;
+  }
+
+  for (int i = 0; i < file->lines.count; i++) {
+    Line* line = file->lines.items[i];
+
+    int count = find(data, size, line->chars.items, line->chars.count);
+
+    total_matches += count;
+
+    for (int j = 0; j < count; j++) {
+      match_array_append(&window->matches, (Match){ .x = find_indicies[j], .y = i });
+    }
+
+    if (input_is_pending()) {
+      match_array_clear(&window->matches); // Can't render nothing.
+      interrupted = true;
+      break;
+    }
+  }
+
+  if (!interrupted) {
+    window->match_length = size;
+
+    for (int i = 0; i < window->matches.count; i++) {
+      Match* pos = &window->matches.items[i];
+      debug("Match at: (%d, %d)\n", pos->x, pos->y);
+    }
+
+    // Go through and select the closest match to the current cursor.
+    for (int i = 0; i < window->matches.count; i++) {
+      if (window->matches.items[i].y >= window->saved_cursor_y) {
+        window->match_index = i;
+        break;
+      }
+    }
+
+    set_cursor_based_on_position(window);
+  }
+}
+
 
 //--------------------------------------------------------------------------------------------------
 
@@ -1613,7 +1799,7 @@ static void skip_to_start_of_line(char** data) {
 
 //--------------------------------------------------------------------------------------------------
 
-static bool skip_keyword(char** data, char* keyword) {
+static bool skip_identifier(char** data, char* keyword) {
   skip_spaces(data);
 
   int size = strlen(keyword);
@@ -1628,13 +1814,14 @@ static bool skip_keyword(char** data, char* keyword) {
 
 //--------------------------------------------------------------------------------------------------
 
-static char* get_name(char** data, int* size) {
+static char* read_identifier(char** data, int* size) {
   skip_spaces(data);
 
   char* tmp = *data;
   char* start = tmp;
 
-  while (*tmp && is_indentifier_literal(*tmp)) {  // Note: will accept names which start with numbers.
+  // Note: will accept names which start with numbers.
+  while (is_indentifier_literal(*tmp)) {
     tmp++;
   }
 
@@ -1681,34 +1868,39 @@ static bool read_number(char** data, int* number) {
 static void handle_command(Window* window) {
   add_null_termination(&window->minibar_data);
 
-  char* command = window->minibar_data.items;
+  debug("test\n");
 
-  if (skip_keyword(&command, "split")) {
-    if (skip_char(&command, '-')) {
+  char* data = window->minibar_data.items;
+
+  if (skip_identifier(&data, "split")) {
+    if (skip_char(&data, '-')) {
       split_window(window, true);
     }
-    else if (skip_char(&command, '|')) {
+    else if (skip_char(&data, '|')) {
       split_window(window, false);
     }
     else {
       display_error(window, "cant split");
     }
   }
-  else if (skip_keyword(&command, "theme")) {
+  else if (skip_identifier(&data, "theme")) {
     int theme = -1;
-    if (!read_number(&command, &theme)) {
+    if (!read_number(&data, &theme)) {
       int size;
-      char* name = get_name(&command, &size);
+      char* name = read_identifier(&data, &size);
       if (size) {
         for (int i = 0; i < ColorThemeCount; i++) {
-          if (!strncmp(themes[i].name, name, size)) {
+          if (themes[i].name && !strncmp(themes[i].name, name, size)) {
             theme = i;
             break;
           }
         }
       }
     }
-    if (0 <= theme && theme < ColorThemeCount) {
+
+    theme = limit(theme, 0, ColorThemeCount - 1);
+
+    if (theme != current_theme) {
       current_theme = theme;
       update_terminal_background();
 
@@ -1717,7 +1909,7 @@ static void handle_command(Window* window) {
       }
     }
   }
-  else if (skip_keyword(&command, "close")) {
+  else if (skip_identifier(&data, "close")) {
     remove_window(window);
   }
   else {
@@ -1727,7 +1919,7 @@ static void handle_command(Window* window) {
 
 //--------------------------------------------------------------------------------------------------
 
-static void bar_handle_enter(Window* window) {
+static void handle_minibar_enter(Window* window) {
   char* data = window->minibar_data.items;
   int size = window->minibar_data.count;
 
@@ -1745,8 +1937,7 @@ static void bar_handle_enter(Window* window) {
     }
 
     case MinibarModeNew:
-      File* file = create_file(window->minibar_data.items, window->minibar_data.count);
-      change_file(window, file);
+      change_file(window, create_file(window->minibar_data.items, window->minibar_data.count));
       break;
 
     case MinibarModeCommand:
@@ -1762,131 +1953,28 @@ static void bar_handle_enter(Window* window) {
       debug("Unhandled minibar type\n");
   }
 
-  // More error handling is needed.
-  char_array_clear(&window->minibar_data);
+  string_clear(&window->minibar_data);
 }
 
 //--------------------------------------------------------------------------------------------------
 
-static void exit_bar_view(Window* window) {
-  window->minibar_active = 0;
-  window->minibar_cursor = 0;
-  window->minibar_data.count = 0;
-  window->minibar_offset = 0;
-}
+static void minibar_handle_keypress(Window* window, int keycode) {
+  int delete_count = 1;
 
-//--------------------------------------------------------------------------------------------------
-
-static bool input_pending() {
-  fd_set set;
-  FD_ZERO(&set);
-  FD_SET(STDIN_FILENO, &set);
-
-  struct timeval timeout;
-  timeout.tv_sec = 0;
-  timeout.tv_usec = 0;
-
-  return select(1, &set, 0, 0, &timeout) == 1;
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void set_cursor_based_on_position(Window* window) {
-  Position* position = &window->matches.items[window->match_index];
-
-  int width, height;
-  get_active_size(window, &width, &height);
-
-  if (position->y >= window->offset_y + height - EditorCursorMarginBottom) {
-    debug("ok\n");
-    window->offset_y = 999999;
-  }
-
-  window->cursor_y = position->y;
-  window->cursor_x = position->x;
-
-  window->redraw = true;
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static int skipped_comp;
-static int comp;
-
-static void update_find(Window* window) {
-  if (!window->file) return;
-
-  char* data = window->minibar_data.items;
-  int size = window->minibar_data.count;
-
-  make_search_lookup(data, size);
-
-  File* file = window->file;
-
-  int total = 0;
-  int lines = 0;
-
-  bool stop = false;
-  skipped_comp = 0;
-  comp = 0;
-
-  position_array_clear(&window->matches);
-
-  for (int i = 0; i < file->lines.count; i++) {
-    static int indices[1024];
-    Line* line = file->lines.items[i];
-    int count = search(data, size, line->chars.items, line->chars.count, indices);
-    total += count;
-    if (count) {
-      lines++;
-    }
-
-    for (int x = 0; x < count; x++) {
-      position_array_append(&window->matches, (Position){.x = indices[x], .y = i});
-    }
-
-    // Our search is actually very slow, maybe the implementation is wrong!
-    if (input_pending()) {
-      stop = true;
-      position_array_clear(&window->matches);
-      break;
-    }
-  }
-
-  if (!stop) {
-    debug("Found %d matches in %d lines [skip %d comp %d]\n", total, lines, skipped_comp, comp);
-
-    for (int i = 0; i < window->matches.count; i++) {
-      debug("Match: %d %d\n", window->matches.items[i].x, window->matches.items[i].y);
-    }
-
-    window->match_length = size;
-
-    // Go through and select the closest match to the current cursor.
-    for (int i = 0; i < window->matches.count; i++) {
-      if (window->matches.items[i].y >= window->saved_cursor_y) {
-        window->match_index = i;
-        break;
-      }
-    }
-
-    set_cursor_based_on_position(window);
-  }
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void bar_handle_keypress(Window* window, int keycode) {
   if (KeyCodePrintableStart <= keycode && keycode <= KeyCodePrintableEnd) {
-    char_array_insert(&window->minibar_data, keycode, window->minibar_cursor++);
+    string_insert(&window->minibar_data, keycode, window->minibar_cursor++);
 
     if (window->minibar_mode == MinibarModeFind) {
-      update_find(window);
+      find_in_file(window);
     }
   }
   else switch (keycode) {
     case KeyCodeEscape:
-      exit_bar_view(window);
+      // Terminatino of the current process. In case of find, the cursor might have changed. Restore it.
+      window->cursor_x = window->saved_cursor_x;
+      window->cursor_y = window->saved_cursor_y;
+      window->matches.count = 0; // Disable find. Do something better.
+      exit_minibar_mode(window);
       break;
 
     case KeyCodeLeft:
@@ -1924,24 +2012,29 @@ static void bar_handle_keypress(Window* window, int keycode) {
       break;
 
     case KeyCodeCtrlDelete:
+      delete_count = get_delete_count(window, window->minibar_data.items, window->minibar_cursor, true);
     case KeyCodeDelete:
       if (window->minibar_cursor) {
-        char_array_remove(&window->minibar_data, window->minibar_cursor - 1);
-        window->minibar_cursor--;
+        string_remove_multiple(&window->minibar_data, window->minibar_cursor - delete_count, delete_count);
+        window->minibar_cursor -= delete_count;
 
         if (window->minibar_mode == MinibarModeFind) {
-          update_find(window);
+          find_in_file(window);
         }
       }
       break;
 
     case KeyCodeEnter:
-      bar_handle_enter(window);
-      exit_bar_view(window);
+      handle_minibar_enter(window);
+      exit_minibar_mode(window);
       break;
 
     default:
       debug("Unhandled minibar keycode: %d\n", keycode);
+  }
+
+  if (window->file) {
+    limit_window_cursor(window);
   }
 }
 
@@ -1960,7 +2053,7 @@ static void update() {
       Window* window = focused_window;
 
       if (window->minibar_active) {
-        bar_handle_keypress(window, keycode);
+        minibar_handle_keypress(window, keycode);
       }
       else {
         editor_handle_keypress(window, keycode);
@@ -1975,15 +2068,16 @@ static void update() {
 //--------------------------------------------------------------------------------------------------
 
 static void render_line(File* file, Line* line) {
-  if (!file || !file->highlight) return;
-
+  // Must be done even though we have no highlighting.
   line->redraw = true;
+
+  if (!file->highlight) return;
 
   int size = line->chars.count;
   char* data = line->chars.items;
   char* end = line->chars.items + size;
 
-  char_array_extend(&line->colors, line->chars.count);
+  int_array_extend(&line->colors, line->chars.count);
   line->colors.count = line->chars.count;
 
   Highlight* highlight = file->highlight;
@@ -1995,11 +2089,16 @@ static void render_line(File* file, Line* line) {
   int single_size = strlen(highlight->single_line_comment_start);
   char* single = highlight->single_line_comment_start;
 
+  int tmp = 0;
+
   while (i < size) {
     char c = data[i];
 
     while (i < size && c == ' ') {
-      c = data[++i];
+      line->colors.items[i] = def;
+      i++;
+      tmp++;
+      c = data[i];
     }
 
     int remain = size - i;
@@ -2009,17 +2108,22 @@ static void render_line(File* file, Line* line) {
     if (is_number(c)) {
       do {
         line->colors.items[i] = highlight->numbers ? ColorTypeNumber : def;
+        tmp++;
       } while (++i < size && is_number(data[i]));
     }
     else if (!memcmp(single, data + i, single_size)) {
       for (int x = i; x < size; x++) {
         line->colors.items[x] = ColorTypeComment;
+        tmp++;
       }
       break;
     }
     else if (is_letter(c)) {
       int start = i;
-      while (++i < size && (is_letter(data[i]) || is_number(data[i]) || data[i] == '_'));
+
+      while (i < size && (is_letter(data[i]) || is_number(data[i]) || data[i] == '_')) {
+        i++;
+      }
       int size = i - start;
       int color = def;
       if (size < MaxKeywordSize) {
@@ -2029,7 +2133,6 @@ static void render_line(File* file, Line* line) {
           while (*keywords) {
             if (!memcmp(data + start, *keywords, size)) {
               color = ColorTypeKeyword;
-              debug("matching: %s\n", *keywords);
               break;
             }
             keywords++;
@@ -2039,11 +2142,24 @@ static void render_line(File* file, Line* line) {
 
       for (int x = start; x < i; x++) {
         line->colors.items[x] = color;
+        tmp++;
       }
     }
     else {
       line->colors.items[i] = def;
+      tmp++;
       i++;
+    }
+  }
+
+  assert(tmp == size);
+
+  assert(line->colors.count == line->chars.count);
+
+  for (int i = 0;i < line->chars.count; i++) {
+    int tmp = line->colors.items[i];
+    if (tmp < 0 || ColorTypeCount <= tmp) {
+      debug("Error: %d\n", tmp);
     }
   }
 }
@@ -2137,13 +2253,13 @@ static void render_status_bar(Window* window) {
 //--------------------------------------------------------------------------------------------------
 
 static void render_window(Window* window) {
-  if (window->file) {
+  File* file = window->file;
+
+  if (file) {
     int width, height;
     get_active_size(window, &width, &height);
 
-    int number_width = window->file ? count_digits(window->file->lines.count) : 1;
-
-    int color = 0;
+    int number_width = count_digits(file->lines.count - 1); // Done another place, cleanup!
 
     set_background_color(ColorTypeEditorBackground);
     set_foreground_color(ColorTypeEditorForeground);
@@ -2154,12 +2270,12 @@ static void render_window(Window* window) {
       current_index++;
     }
 
-    for (int j = 0; j < get_visible_line_count(window); j++) {
-      if (!redraw_line[window->region->y + j]) continue;
+    for (int y = 0; y < get_visible_line_count(window); y++) {
+      if (!redraw_line[window->region->y + y]) continue;
 
-      Line* line = window->file->lines.items[window->offset_y + j];
+      Line* line = file->lines.items[window->offset_y + y];
 
-      set_window_cursor(window, 0, j);
+      set_window_cursor(window, 0, y);
 
       if (window->region->x) {
         set_background_color(ColorTypeMinibarBackground);
@@ -2168,26 +2284,22 @@ static void render_window(Window* window) {
         print(" ");
       }
 
-      if (color != ColorTypeEditorForeground) {
-        color = ColorTypeEditorForeground;
-        set_foreground_color(color);
-      }
-
-      print("%*d", number_width, window->offset_y + j);
+      set_foreground_color(ColorTypeEditorForeground);
+      print("%*d", number_width, window->offset_y + y);
       print("%*c", EditorLineNumberMargin, ' ');
 
       int size = max(min(line->chars.count - window->offset_x, width), 0);
 
       int count = window->match_length;
-      bool match = window->offset_y + j == window->cursor_y;
+      bool match = window->offset_y + y == window->cursor_y;
 
       for (int i = 0; i < size; i++) {
         int index = window->offset_x + i;
 
         // Check for a highlight match.
-        Position* position = &window->matches.items[current_index];
+        Match* position = &window->matches.items[current_index];
 
-        if (window->matches.count && position->y == window->offset_y + j) {
+        if (window->matches.count && position->y == window->offset_y + y) {
           if (position->x == index) {
             if (position->x == window->cursor_x && position->y == window->cursor_y) {
               set_foreground_color(ColorTypeSelectedMatchForeground);
@@ -2205,15 +2317,8 @@ static void render_window(Window* window) {
           }
         }
 
-        if (line->colors.items[index] != color) {
-          color = line->colors.items[index];
-          set_foreground_color(color);
-
-          int tmp = themes[current_theme].colors[color];
-
-          if (color == ColorTypeKeyword) {
-            debug(" %06x %d %d oesnuthaosenuth\n", tmp, color, current_theme);
-          }
+        if (file->highlight) {
+          set_foreground_color(line->colors.items[index]);
         }
 
         print("%c", line->chars.items[index]);
@@ -2221,6 +2326,19 @@ static void render_window(Window* window) {
     }
 
     for (int j = get_visible_line_count(window); j < height; j++) {
+      if (!redraw_line[window->region->y + j]) continue;
+      set_window_cursor(window, 0, j);
+      if (window->region->x) {
+        set_background_color(ColorTypeMinibarBackground);
+        print(" ");
+        set_background_color(ColorTypeEditorBackground);
+        print(" ");
+      }
+    }
+  }
+  else {
+
+    for (int j = 0; j < window->region->height - 1; j++) {
       if (!redraw_line[window->region->y + j]) continue;
       set_window_cursor(window, 0, j);
       if (window->region->x) {
@@ -2284,13 +2402,8 @@ static void mark_lines_for_redraw() {
 //--------------------------------------------------------------------------------------------------
 
 static void render() {
-  for (int i = 0; i < windows.count; i++) {
-    //update_window_offsets(windows.items[i]);
-  }
-
   mark_lines_for_redraw();
-
-  set_background_color(ColorTypeEditorBackground);
+  set_background_color(ColorTypeEditorBackground); // @Necessary?
 
   for (int i = 0; i < master_region.height; i++) {
     if (redraw_line[i]) {
@@ -2329,7 +2442,6 @@ static void render() {
 
 static void resize_window(Window* window, int amount) {
   Region* parent = window->region->parent;
-
   if (!parent) return;
 
   int total = parent->stacked ? parent->height : parent->width;
@@ -2506,81 +2618,6 @@ static Window* split_window(Window* window, bool vertical) {
 
 //--------------------------------------------------------------------------------------------------
 
-static int char_lookup[256];
-static int index_lookup[1024];
-
-//--------------------------------------------------------------------------------------------------
-
-static void make_search_lookup(char* data, int size) {
-  for (int i = 0; i < 256; i++) {
-    char_lookup[i] = size;
-  }
-
-  for (int i = 0; i < size; i++) {
-    char_lookup[(int)data[i]] = size - i - 1;
-  }
-
-  for (int i = size - 1; i > 0; i--) {
-    int shift = 0;
-    for (int j = i - 1; j >= 0; j--) {
-      if (!strncmp(data + j, data + i, size - i)) {
-        if ((j && data[j] != data[i - 1]) || !shift) {
-          shift = i - j;
-        }
-      }
-    }
-
-    index_lookup[i] = shift ? shift : 1;
-  }
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static int search(char* word, int word_length, char* data, int data_length, int* indices) {
-  int data_index = word_length - 1;
-
-  int count = 0;
-
-  make_search_lookup(word, word_length);
-
-  while (data_index < data_length) {
-    int tmp_data_index = data_index;
-    int word_index = word_length - 1;
-    int match_count = 0;
-
-    comp++;
-    while (word_index >= 0 && word[word_index] == data[data_index]) {
-      word_index--;
-      data_index--;
-      match_count++;
-      comp++;
-    }
-
-    if (word_index < 0) {
-      indices[count++] = data_index + 1;
-      data_index += word_length + 1;
-      continue;
-    }
-
-    /*
-    else if (match_count) {
-      data_index = tmp_data_index + index_lookup[match_count];
-    }
-    else {
-      data_index = tmp_data_index + char_lookup[(int)data[data_index]];
-    }
-    */
-
-    int skip = match_count ? index_lookup[match_count] : char_lookup[(int)data[data_index]];
-    skipped_comp += skip;
-    data_index = tmp_data_index + skip;
-  }
-
-  return count;
-}
-
-//--------------------------------------------------------------------------------------------------
-
 static void resize_master_region() {
   get_terminal_size(&master_region.width, &master_region.height);
   resize_child_regions(&master_region);
@@ -2618,7 +2655,7 @@ static void terminal_init() {
 //--------------------------------------------------------------------------------------------------
 
 static void editor_init() {
-  char_array_init(&framebuffer, 16 * 1024);
+  string_init(&framebuffer, 16 * 1024);
   window_array_init(&windows, 16);
   file_array_init(&files, 16);
 

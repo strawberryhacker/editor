@@ -222,6 +222,7 @@ typedef struct Window Window;
 typedef struct Region Region;
 typedef struct Action Action;
 typedef struct Highlight Highlight;
+typedef struct FileState FileState;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -232,6 +233,7 @@ define_array(line_array, LineArray, Line* );
 define_array(file_array, FileArray, File* );
 define_array(window_array, WindowArray, Window* );
 define_array(position_array, PositionArray, Position);
+define_array(file_state_array, FileStateArray, FileState* );
 
 //--------------------------------------------------------------------------------------------------
 
@@ -360,9 +362,30 @@ struct Region {
 
 //--------------------------------------------------------------------------------------------------
 
+struct FileState {
+  File* file;
+
+  int cursor_x;
+  int cursor_y;
+  int cursor_x_ideal;
+
+  int offset_x;
+  int offset_y;
+  
+  int mark_x;
+  int mark_y;
+  bool mark_valid;
+
+  int previous_keycode;
+};
+
+//--------------------------------------------------------------------------------------------------
+
 struct Window {
   File* file;
   Region* region;
+
+  FileStateArray file_states;
 
   bool redraw;
 
@@ -405,13 +428,10 @@ static Region master_region;
 static WindowArray windows;
 static FileArray files;
 static CharArray clipboard;
-
-static CharArray buffer; // Used for termporary copies.
+static CharArray buffer;
 
 static bool redraw_line[1024];
-
 static bool running = true;
-
 static int current_theme = ColorThemeJonBlow;
 
 //--------------------------------------------------------------------------------------------------
@@ -431,6 +451,7 @@ static int search(char* word, int word_length, char* data, int data_length, int*
 static void render_line(File* file, Line* line);
 static int get_delete_count(Window* window, bool delete_word);
 static void render_line(File* file, Line* line);
+static void change_file(Window* window, File* file);
 
 //--------------------------------------------------------------------------------------------------
 
@@ -903,6 +924,73 @@ static int save_file(File* file) {
 
 //--------------------------------------------------------------------------------------------------
 
+static FileState* get_file_state(Window* window, File* file) {
+  for (int i = 0; i < window->file_states.count; i++) {
+    FileState* state = window->file_states.items[i];
+    if (state->file == file) {
+      return state;
+    }
+  }
+
+  return 0;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void change_file(Window* window, File* file) {
+  File* old_file = window->file;
+  window->file = file;
+
+  if (old_file) {
+    FileState* state = get_file_state(window, old_file);
+
+    if (!state) {
+      state = calloc(1, sizeof(FileState));
+      state->file = old_file;
+      file_state_array_append(&window->file_states, state);
+    }
+
+    state->cursor_x = window->cursor_x;
+    state->cursor_y = window->cursor_y;
+    state->cursor_x_ideal = window->cursor_x_ideal;
+    state->offset_x = window->offset_x;
+    state->offset_y = window->offset_y;
+    state->mark_x = window->mark_x;
+    state->mark_y = window->mark_y;
+    state->mark_valid = window->mark_valid;
+    state->previous_keycode = window->previous_keycode;
+  }
+
+  FileState* state = get_file_state(window, file);
+
+  if (state) {
+    window->cursor_x = state->cursor_x;
+    window->cursor_y = state->cursor_y;
+    window->cursor_x_ideal = state->cursor_x_ideal;
+    window->offset_x = state->offset_x;
+    window->offset_y = state->offset_y;
+    window->mark_x = state->mark_x;
+    window->mark_y = state->mark_y;
+    window->mark_valid = state->mark_valid;
+    window->previous_keycode = state->previous_keycode;
+  }
+  else {
+    window->cursor_x = 0;
+    window->cursor_y = 0;
+    window->cursor_x_ideal = 0;
+    window->offset_x = 0;
+    window->offset_y = 0;
+    window->mark_x = 0;
+    window->mark_y = 0;
+    window->mark_valid = false;
+    window->previous_keycode = 0;
+  }
+
+  window->redraw = true;
+}
+
+//--------------------------------------------------------------------------------------------------
+
 static int count_digits(int number) {
   int digits = 0;
 
@@ -1005,6 +1093,7 @@ static void limit_window_cursor(Window* window) {
   window->cursor_y = max(window->cursor_y, 0);
   window->cursor_y = min(window->cursor_y, window->file->lines.count - 1);
   window->cursor_x = min(window->cursor_x, window->file->lines.items[window->cursor_y]->chars.count);
+  update_window_offsets(window);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1012,7 +1101,6 @@ static void limit_window_cursor(Window* window) {
 static void update_window_cursor_x(Window* window, int x) {
   window->cursor_x = x;
   window->cursor_x_ideal = x;
-  limit_window_cursor(window);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1020,7 +1108,6 @@ static void update_window_cursor_x(Window* window, int x) {
 static void update_window_cursor_y(Window* window, int y) {
   window->cursor_y = y;
   window->cursor_x = window->cursor_x_ideal;
-  limit_window_cursor(window);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1327,19 +1414,21 @@ static void paste(Window* window) {
 
 //--------------------------------------------------------------------------------------------------
 
-static void enter_minibar_mode(Window* window, int type) {
+static void enter_minibar_mode(Window* window, int mode) {
   window->minibar_active = true;
-  window->minibar_mode = type;
+  window->minibar_mode = mode;
   window->error_present = false;
+
+  if (mode == MinibarModeFind) {
+    window->saved_cursor_x = window->cursor_x;
+    window->saved_cursor_y = window->cursor_y;
+  }
 }
 
 //--------------------------------------------------------------------------------------------------
 
 static void editor_handle_keypress(Window* window, int keycode) {
-  if (window->file && KeyCodePrintableStart <= keycode && keycode <= KeyCodePrintableEnd) {
-    insert_character(window, (char)keycode);
-  }
-  else if (keycode == UserKeyOpen) {
+  if (keycode == UserKeyOpen) {
     enter_minibar_mode(window, MinibarModeOpen);
   }
   else if (keycode == UserKeyFocusNext) {
@@ -1427,9 +1516,6 @@ static void editor_handle_keypress(Window* window, int keycode) {
       break;
 
     case KeyCodeCtrlF:
-      // Save the current position since the cursor will be updated.
-      window->saved_cursor_x = window->cursor_x;
-      window->saved_cursor_y = window->cursor_y;
       enter_minibar_mode(window, MinibarModeFind);
       break;
 
@@ -1490,22 +1576,15 @@ static void editor_handle_keypress(Window* window, int keycode) {
       break;
 
     default:
-      debug("Unhandled window keycode: %d\n", keycode);
+      if (KeyCodePrintableStart <= keycode && keycode <= KeyCodePrintableEnd) {
+        insert_character(window, (char)keycode);
+      }
+      else {
+        debug("Unhandled window keycode: %d\n", keycode);
+      }
   }
-}
 
-//--------------------------------------------------------------------------------------------------
-
-static void change_file(Window* window, File* file) {
-  // Todo: save information in a separate structure per window per file for later reuse.
-  window->file = file;
-  window->redraw = true;
-  window->cursor_x = 0;
-  window->cursor_y = 0;
-  window->offset_x = 0;
-  window->offset_y = 0;
-  window->cursor_x_ideal = 0;
-  window->mark_valid = false;
+  limit_window_cursor(window);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -2206,7 +2285,7 @@ static void mark_lines_for_redraw() {
 
 static void render() {
   for (int i = 0; i < windows.count; i++) {
-    update_window_offsets(windows.items[i]);
+    //update_window_offsets(windows.items[i]);
   }
 
   mark_lines_for_redraw();

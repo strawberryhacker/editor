@@ -1,3 +1,7 @@
+
+test
+hello
+
 #include "array.h"
 #include "stdio.h"
 #include "stdarg.h"
@@ -9,6 +13,10 @@
 #include "fcntl.h"
 #include "sys/stat.h"
 #include "sys/time.h"
+
+test
+hello
+
 #include "sys/select.h"
 
 //--------------------------------------------------------------------------------------------------
@@ -1083,7 +1091,7 @@ static void enter_minibar_mode(Window* window, int type) {
 
 //--------------------------------------------------------------------------------------------------
 
-static bool is_name_letter(char c) {
+static bool is_indentifier_literal(char c) {
   return ('0' <= c && c <= '9') || ('A' <= c && c <= 'Z') || ('a' <= c && c <= 'z') || (c == '_');
 }
 
@@ -1111,7 +1119,7 @@ static int get_delete_count(Window* window, bool delete_word) {
       space_count++;
     }
 
-    if (is_name_letter(c)) {
+    if (is_indentifier_literal(c)) {
       char_count++;
     }
     else {
@@ -1133,7 +1141,7 @@ static int get_delete_count(Window* window, bool delete_word) {
 //--------------------------------------------------------------------------------------------------
 
 // Makes sure the start mark comes before the end mark.
-static void normalize_block(int* start_x, int* start_y, int* end_x, int* end_y) {
+static void sort_marks(int* start_x, int* start_y, int* end_x, int* end_y) {
   if (*start_y > *end_y || (*start_y == *end_y && *start_x > *end_x)) {
     int tmp_x = *start_x;
     int tmp_y = *start_y;
@@ -1239,7 +1247,7 @@ static void handle_copy(Window* window) {
   int end_x = window->cursor_x;
   int end_y = window->cursor_y;
 
-  normalize_block(&start_x, &start_y, &end_x, &end_y);
+  sort_marks(&start_x, &start_y, &end_x, &end_y);
 
   debug("Copying from [%d, %d] to [%d, %d]\n", start_x, start_y, end_x, end_y);
   
@@ -1259,7 +1267,7 @@ static void handle_cut(Window* window) {
   int end_x = window->cursor_x;
   int end_y = window->cursor_y;
 
-  normalize_block(&start_x, &start_y, &end_x, &end_y);
+  sort_marks(&start_x, &start_y, &end_x, &end_y);
 
   debug("Cutting from [%d, %d] to [%d, %d]\n", start_x, start_y, end_x, end_y);
   
@@ -1511,7 +1519,7 @@ static char* get_name(char** data, int* size) {
   char* tmp = *data;
   char* start = tmp;
 
-  while (*tmp && is_name_letter(*tmp)) {  // Note: will accept names which start with numbers.
+  while (*tmp && is_indentifier_literal(*tmp)) {  // Note: will accept names which start with numbers.
     tmp++;
   }
 

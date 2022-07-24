@@ -68,6 +68,16 @@ static inline void name##_insert_multiple(ArrayType* array, ItemType* items, int
   array->count += count;                                                                                           \
 }                                                                                                                  \
                                                                                                                    \
+static inline void name##_allocate_insert_multiple(ArrayType* array, int count, int index) {                       \
+  name##_extend(array, array->count + count);                                                                      \
+                                                                                                                   \
+  if (index < array->count) {                                                                                      \
+    memmove(&array->items[index + count], &array->items[index], (array->count - index) * sizeof(ItemType));        \
+  }                                                                                                                \
+                                                                                                                   \
+  array->count += count;                                                                                           \
+}                                                                                                                  \
+                                                                                                                   \
 static inline void name##_insert(ArrayType* array, ItemType item, int index) {                                     \
   name##_insert_multiple(array, &item, 1, index);                                                                  \
 }                                                                                                                  \
@@ -90,6 +100,17 @@ static inline void name##_remove(ArrayType* array, int index) {                 
                                                                                                                    \
   array->count--;                                                                                                  \
 }                                                                                                                  \
+                                                                                                                   \
+                                                                                                                   \
+static inline void name##_remove_multiple(ArrayType* array, int index, int count) {                                \
+  int end = index + count;                                                                                         \
+  if (index < array->count) {                                                                                      \
+    memmove(&array->items[index], &array->items[end], (array->count - end) * sizeof(ItemType));                    \
+  }                                                                                                                \
+                                                                                                                   \
+  array->count -= count;                                                                                           \
+}                                                                                                                  \
+                                                                                                                   \
 static inline void name##_truncate(ArrayType* array, int size) {                                                   \
   array->count = size;                                                                                             \
 }

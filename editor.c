@@ -416,9 +416,7 @@ static int current_theme = ColorThemeJonBlow;
 
 //--------------------------------------------------------------------------------------------------
 
-static void delete_line(Line* line);
-static Line* append_line(File* file);
-static void append_chars(Line* line, char* data, int size);
+static void delete_line(File* file, int index);
 static Window* split_window(Window* window, bool vertical);
 static void child_resized(Region* region);
 static void resize_child_regions(Region* region);
@@ -426,13 +424,13 @@ static void resize_window(Window* window, int amount);
 static void remove_window(Window* window);
 static void swap_windows(Window* window);
 static void focus_next();
-static void render_line(Line* line);
 static void focus_previous();
 static void compile_and_parse_issues();
 static void make_search_lookup(char* data, int size);
 static int search(char* word, int word_length, char* data, int data_length, int* indices);
-static void update_highlight(File* file, Line* line);
+static void render_line(File* file, Line* line);
 static int get_delete_count(Window* window, bool delete_word);
+static void render_line(File* file, Line* line);
 
 //--------------------------------------------------------------------------------------------------
 
@@ -691,49 +689,6 @@ static void add_null_termination(CharArray* array) {
 
 //--------------------------------------------------------------------------------------------------
 
-static File* allocate_file(char* path, int path_size) {
-  File* file = calloc(1, sizeof(File));
-  file_array_append(&files, file);
-
-  char_array_append_multiple(&file->path, path, path_size);
-  add_null_termination(&file->path);
-
-  for (int i = 0; i < LanguageCount; i++) {
-    bool match = false;
-    for (char** ext = highlights[i].extensions; *ext; ext++) {
-      debug("Ext: %s\n", *ext);
-      int length = strlen(*ext);
-      //debug("Pfile: %.*s\n", path + path_size - length)
-      if (path_size > length && !memcmp(path + path_size - length, *ext, length)) {
-        match = true;
-        break;
-      }
-    }
-    if (match) {
-      file->highlight = &highlights[i];
-      debug("Adding highlight\n");
-    }
-  }
-
-  file->saved = true;
-  file->redraw = true;
-
-  return file;
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void delete_file(File* file) {
-  for (int i = 0; i < file->lines.count; i++) {
-    delete_line(file->lines.items[i]);
-  }
-
-  line_array_delete(&file->lines);
-  free(file);
-}
-
-//--------------------------------------------------------------------------------------------------
-
 static Window* allocate_window() {
   Window* window = calloc(1, sizeof(Window));
   window->redraw = true;
@@ -752,6 +707,86 @@ static void free_window(Window* window) {
   }
 
   free(window);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static File* allocate_file(char* path, int path_size) {
+  File* file = calloc(1, sizeof(File));
+  file_array_append(&files, file);
+
+  char_array_append_multiple(&file->path, path, path_size);
+  add_null_termination(&file->path);
+
+  // Load the correct highlighting to the file.
+  for (int i = 0; i < LanguageCount; i++) {
+    bool match = false;
+    for (char** ext = highlights[i].extensions; *ext; ext++) {
+      int ext_size = strlen(*ext);
+      if (path_size > ext_size && !memcmp(path + path_size - ext_size, *ext, ext_size)) {
+        match = true;
+        break;
+      }
+    }
+
+    if (match) {
+      file->highlight = &highlights[i];
+    }
+  }
+
+  file->saved = true;
+  file->redraw = true;
+
+  return file;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void delete_file(File* file) {
+  while (file->lines.count) {
+    delete_line(file, 0);
+  }
+
+  line_array_delete(&file->lines);
+  free(file);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void insert_lines(File* file, int index, int count) {
+  line_array_allocate_insert_multiple(&file->lines, count, index);
+
+  for (int i = 0; i < count; i++) {
+    file->lines.items[index + i] = calloc(1, sizeof(Line));
+  }
+  
+  file->redraw = true;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static Line* insert_line(File* file, int index) {
+  insert_lines(file, index, 1);
+  return file->lines.items[index];
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void delete_lines(File* file, int index, int count) {
+  for (int i = 0; i < count; i++) {
+    Line* line = file->lines.items[index + i];
+    char_array_delete(&line->chars);
+    free(line);
+  }
+
+  line_array_remove_multiple(&file->lines, index, count);
+  file->redraw = true;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void delete_line(File* file, int index) {
+  delete_lines(file, index, 1);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -807,17 +842,19 @@ static File* open_file(char* path, int path_size) {
   }
 
   file = allocate_file(path, path_size);
-  line_array_extend(&file->lines, line_count);
 
-  Line* line = append_line(file);
+  line_array_extend(&file->lines, line_count);
+  Line* line = insert_line(file, 0);
 
   cr = 0;
   int index = 0;
 
   for (int i = 0; i < size; i++) {
     if (data[i] == '\n') {
-      append_chars(line, &data[index], i - index - cr);
-      line = append_line(file);
+      char_array_append_multiple(&line->chars, &data[index], i - index - cr);
+      render_line(file, line);
+
+      line = insert_line(file, file->lines.count);
       index = i + 1;
       cr = 0;
     }
@@ -827,12 +864,9 @@ static File* open_file(char* path, int path_size) {
   }
 
   if (index < size) {
-    Line* line = append_line(file);
-    append_chars(line, &data[index], size - index - cr);
-  }
-
-  for (int i = 0; i < file->lines.count; i++) {
-    update_highlight(file, file->lines.items[i]);
+    Line* line = insert_line(file, file->lines.count);
+    char_array_append_multiple(&line->chars, &data[index], size - index - cr);
+    render_line(file, line);
   }
 
   return file;
@@ -842,14 +876,13 @@ static File* open_file(char* path, int path_size) {
 
 static File* create_file(char* path, int path_size) {
   File* file = allocate_file(path, path_size);
-  append_line(file);
-  file->saved = false;
+  insert_line(file, 0);
   return file;
 }
 
 //--------------------------------------------------------------------------------------------------
 
-static bool save_file(File* file) {
+static int save_file(File* file) {
   int fd = open(file->path.items, O_WRONLY | O_CREAT | O_TRUNC, 0666); // Do we want r/w for all users?
   if (fd < 0) return false;
 
@@ -870,51 +903,15 @@ static bool save_file(File* file) {
 
 //--------------------------------------------------------------------------------------------------
 
-static Line* append_line(File* file) {
-  Line* line = calloc(1, sizeof(Line));
-  line_array_append(&file->lines, line);
-  file->redraw = true;
-  return line;
-}
+static int count_digits(int number) {
+  int digits = 0;
 
-//--------------------------------------------------------------------------------------------------
+  do {
+    number /= 10;
+    digits++;
+  } while (number);
 
-static Line* insert_line(File* file, int offset) {
-  Line* line = calloc(1, sizeof(Line));
-  line_array_insert(&file->lines, line, offset);
-  file->redraw = true;
-  return line;
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void delete_line(Line* line) {
-  char_array_delete(&line->chars);
-  free(line);
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void append_chars(Line* line, char* data, int size) {
-  char_array_append_multiple(&line->chars, data, size);
-  line->redraw = true;
-  //render_line(line);
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void append_char(Line* line, char c) {
-  char_array_append(&line->chars, c);
-  line->redraw = true;
-  //render_line(line);
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void delete_char(Line* line, int index) {
-  char_array_remove(&line->chars, index);
-  line->redraw = true;
-  //render_line(line);
+  return digits;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -931,140 +928,18 @@ static bool is_number(char c) {
 
 //--------------------------------------------------------------------------------------------------
 
-static void update_highlight(File* file, Line* line) {
-  if (!file || !file->highlight) return;
-
-  line->redraw = true;
-
-  int size = line->chars.count;
-  char* data = line->chars.items;
-  char* end = line->chars.items + size;
-
-  char_array_extend(&line->colors, line->chars.count);
-  line->colors.count = line->chars.count;
-
-  Highlight* highlight = file->highlight;
-
-  int def = ColorTypeEditorForeground;
-  
-  int i = 0;
-
-  int single_size = strlen(highlight->single_line_comment_start);
-  char* single = highlight->single_line_comment_start;
-
-  while (i < size) {
-    char c = data[i];
-
-    while (i < size && c == ' ') {
-      c = data[++i];
-    }
-
-    int remain = size - i;
-
-    if (!remain) break;
-
-    if (is_number(c)) {
-      do {
-        line->colors.items[i] = highlight->numbers ? ColorTypeNumber : def;
-      } while (++i < size && is_number(data[i]));
-    }
-    else if (!memcmp(single, data + i, single_size)) {
-      for (int x = i; x < size; x++) {
-        line->colors.items[x] = ColorTypeComment;
-      }
-      break;
-    }
-    else if (is_letter(c)) {
-      int start = i;
-      while (++i < size && (is_letter(data[i]) || is_number(data[i]) || data[i] == '_'));
-      int size = i - start;
-      int color = def;
-      if (size < MaxKeywordSize) {
-        char** keywords = highlight->keywords[size];
-
-        if (keywords) {
-          while (*keywords) {
-            if (!memcmp(data + start, *keywords, size)) {
-              color = ColorTypeKeyword;
-              debug("matching: %s\n", *keywords);
-              break;
-            }
-            keywords++;
-          }
-        }
-      }
-
-      for (int x = start; x < i; x++) {
-        line->colors.items[x] = color;
-      }
-    }
-    else {
-      line->colors.items[i] = def;
-      i++;
-    }
-  }
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void render_line(Line* line) {
-  char_array_extend(&line->colors, line->chars.count);
-
-  char* data = line->chars.items;
-  int size = line->chars.count;
-  char prev = 0;
-  bool comment = false;
-  return;
-
-  for (int i = 0; i < size; i++) {
-    if (data[i] == '/' && prev == '/') {
-      //line->colors.items[i - 1] = 31;
-      comment = true;
-    }
-
-    if (comment) {
-      //line->colors.items[i] = 31;
-    }
-    else {
-      line->colors.items[i] = 0;
-    }
-
-    prev = data[i];
-  }
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static Action* add_history_item(File* file) {
-  return 0;
-}
-
-//--------------------------------------------------------------------------------------------------
-
-
-
-//--------------------------------------------------------------------------------------------------
-
-static int count_digits(int number) {
-  int digits = 0;
-
-  do {
-    number /= 10;
-    digits++;
-  } while (number);
-
-  return digits;
+static bool is_indentifier_literal(char c) {
+  return is_letter(c) || is_number(c) || c == '_';
 }
 
 //--------------------------------------------------------------------------------------------------
 
 static int get_left_padding(Window* window) {
-  if (!window->file) {
-    return EditorLineNumberMargin + 1;
-  }
-  else {
-    return (window->region->x ? 2 : 0) + count_digits(window->file->lines.count) + EditorLineNumberMargin;
-  }
+  int vertical_window_separator_width = (window->region->x) ? 2 : 0;
+  int line_number_width = (window->file) ? count_digits(window->file->lines.count) : 0;
+  int margin = EditorLineNumberMargin;
+
+  return vertical_window_separator_width + line_number_width + margin;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1076,8 +951,7 @@ static int get_left_bar_padding(Window* window) {
 //--------------------------------------------------------------------------------------------------
 
 static void get_active_size(Window* window, int* width, int* height) {
-  int x = window->region->x ? 2 : 0;
-  *width  = window->region->width - get_left_padding(window) - x;
+  *width  = window->region->width - get_left_padding(window);
   *height = window->region->height - MinibarCount;
 }
 
@@ -1156,172 +1030,18 @@ static void update_window_offset_y(Window* window, int offset) {
   window->redraw = true;
 }
 
-
-
 //--------------------------------------------------------------------------------------------------
 
-static void enter_minibar_mode(Window* window, int type) {
-  window->minibar_active = true;
-  window->minibar_mode = type;
-  window->error_present = false;
+static void insert_character(Window* window, char c) {
+  File* file = window->file;
+  Line* line = file->lines.items[window->cursor_y];
+
+  char_array_insert(&line->chars, c, window->cursor_x++);
+  render_line(file, line);
+
+  file->saved = false;
 }
 
-//--------------------------------------------------------------------------------------------------
-
-static bool is_name_letter(char c) {
-  return ('0' <= c && c <= '9') || ('A' <= c && c <= 'Z') || ('a' <= c && c <= 'z') || (c == '_');
-}
-
-//--------------------------------------------------------------------------------------------------
-
-// Makes sure the start mark comes before the end mark.
-static void normalize_block(int* start_x, int* start_y, int* end_x, int* end_y) {
-  if (*start_y > *end_y || (*start_y == *end_y && *start_x > *end_x)) {
-    int tmp_x = *start_x;
-    int tmp_y = *start_y;
-
-    *start_x = *end_x;
-    *start_y = *end_y;
-
-    *end_x = tmp_x;
-    *end_y = tmp_y;
-  }
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void copy_region(Window* window, int start_x, int start_y, int end_x, int end_y) {
-  debug("Copying\n");
-
-  clipboard.count = 0;
-
-  while (start_y != end_y) {
-    Line* line = window->file->lines.items[start_y];
-    for (int i = start_x; i < line->chars.count; i++) {
-      char_array_append(&clipboard, line->chars.items[i]);
-    }
-
-    char_array_append(&clipboard, '\n');
-    start_x = 0;
-    start_y++;
-  }
-
-  Line* line = window->file->lines.items[start_y];
-  debug("startx = %d endx = %d\n", start_x, end_x);
-  for (int i = start_x; i < end_x; i++) {
-    char_array_append(&clipboard, line->chars.items[i]);
-  }
-
-  for (int i = 0; i < clipboard.count; i++) {
-    if (clipboard.items[i] == '\n') {
-      debug("\\n\n");
-    }
-    else {
-      debug("%c", clipboard.items[i]);
-    }
-  }
-
-  debug("\n");
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void delete_region(Window* window, int start_x, int start_y, int end_x, int end_y) {
-  window->file->redraw = true;
-
-  if (start_y == end_y) {
-    debug("Same line\n");
-    Line* start = window->file->lines.items[start_y];
-    int count = end_x - start_x;
-    while (count--) {
-      char_array_remove(&start->chars, start_x);
-    }
-    return;
-  }
-
-  int index = start_y;
-
-  for (int i = start_y + 1; i < end_y; i++) {
-    delete_line(window->file->lines.items[start_y + 1]);
-    line_array_remove(&window->file->lines, start_y + 1);
-  }
-
-  Line* start = window->file->lines.items[start_y];
-  Line* end = window->file->lines.items[start_y + 1];
-
-  start->chars.count = start_x;
-  char_array_append_multiple(&start->chars, end->chars.items + end_x, end->chars.count - end_x);
-
-  while (end_x--) {
-    char_array_remove(&end->chars, 0);
-  }
-  end->redraw = true;
-  window->redraw = true;
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void handle_copy(Window* window) {
-  if (!window->file || !window->mark_valid) {
-    display_error(window, "copy error");
-    return;
-  }
-
-  int start_x = window->mark_x;
-  int start_y = window->mark_y;
-  int end_x = window->cursor_x;
-  int end_y = window->cursor_y;
-
-  normalize_block(&start_x, &start_y, &end_x, &end_y);
-
-  debug("Copying from [%d, %d] to [%d, %d]\n", start_x, start_y, end_x, end_y);
-
-  copy_region(window, start_x, start_y, end_x, end_y);
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void handle_cut(Window* window) {
-  if (!window->file || !window->mark_valid) {
-    display_error(window, "cut error");
-    return;
-  }
-
-  int start_x = window->mark_x;
-  int start_y = window->mark_y;
-  int end_x = window->cursor_x;
-  int end_y = window->cursor_y;
-
-  normalize_block(&start_x, &start_y, &end_x, &end_y);
-
-  debug("Cutting from [%d, %d] to [%d, %d]\n", start_x, start_y, end_x, end_y);
-
-  copy_region(window, start_x, start_y, end_x, end_y);
-  delete_region(window, start_x, start_y, end_x, end_y);
-
-  window->cursor_x = start_x;
-  window->cursor_y = start_y;
-}
-
-//--------------------------------------------------------------------------------------------------
-static void insert_character(Window* window, char c);
-static void handle_paste(Window* window) {
-  if (!window->file || clipboard.count == 0) {
-    display_error(window, "paste error");
-    return;
-  }
-
-  window->mark_x = window->cursor_x;
-  window->mark_y = window->cursor_y;
-
-  for (int i = 0; i < clipboard.count; i++) {
-    insert_character(window, clipboard.items[i]);
-  }
-}
-
-//--------------------------------------------------------------------------------------------------
-//--------------------------------------------------------------------------------------------------
-//--------------------------------------------------------------------------------------------------
 //--------------------------------------------------------------------------------------------------
 
 static void append_spaces(Line* line, int count) {
@@ -1346,80 +1066,15 @@ static char get_last_char(Line* line) {
 
 //--------------------------------------------------------------------------------------------------
 
-static int get_delete_count(Window* window, bool delete_word) {
-  File* file = window->file;
-  Line* line = file->lines.items[window->cursor_y];
-
-  char* data = line->chars.items;
-  int size = window->cursor_y;
-
-  int space_count = 0;
-  int other_count = 0;
-  int char_count = 0;
-
-  for (int i = 0; i < window->cursor_x; i++) {
-    if (data[i] == ' ') {
-      if (space_count == 2) {
-        char_count = 0;
-        other_count = 0;
-      }
-
-      space_count++;
-    }
-    else if (is_name_letter(data[i])) {
-      if (space_count) {
-        char_count = 0;
-      }
-
-      space_count = 0;
-      other_count = 0;
-      char_count++;
-    }
-    else {
-      if (space_count) {
-        other_count = 0;
-      }
-      
-      char_count = 0;
-      space_count = 0;
-      other_count++;
-    }
-  }
-
-  if (delete_word) {
-    return max(1, space_count + char_count + other_count);
-  }
-  else if ((space_count % EditorSpacesPerTab) == 0) {
-    return EditorSpacesPerTab;
-  }
-
-  return 1;
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void insert_character(Window* window, char c) {
-  File* file = window->file;
-  Line* line = file->lines.items[window->cursor_y];
-
-  char_array_insert(&line->chars, c, window->cursor_x++);
-  update_highlight(file, line);
-
-  file->saved = false;
-}
-
-//--------------------------------------------------------------------------------------------------
-
 static void insert_newline(Window* window) {
   File* file = window->file;
   Line* line = file->lines.items[window->cursor_y];
 
-  // Tail of current line is removed and copied to next line.
   char* tail = &line->chars.items[window->cursor_x];
   int tail_size = line->chars.count - window->cursor_x;
   
-  line->chars.count = window->cursor_x;
-  update_highlight(file, line);
+  char_array_truncate(&line->chars, window->cursor_x);
+  render_line(file, line);
 
   int indent = get_leading_spaces(line);
 
@@ -1429,7 +1084,7 @@ static void insert_newline(Window* window) {
 
       append_spaces(line, indent);
       char_array_append(&line->chars, '}');
-      update_highlight(file, line);
+      render_line(file, line);
     }
 
     indent += EditorSpacesPerTab;
@@ -1439,7 +1094,7 @@ static void insert_newline(Window* window) {
 
   append_spaces(line, indent);
   char_array_append_multiple(&line->chars, tail, tail_size);
-  update_highlight(file, line);
+  render_line(file, line);
 
   window->cursor_x = indent;
   window->cursor_y++;
@@ -1456,7 +1111,7 @@ static void delete_character(Window* window) {
   if (window->cursor_x) {
     char_array_remove(&line->chars, window->cursor_x - 1);
     update_window_cursor_x(window, window->cursor_x - 1);
-    update_highlight(file, line);
+    render_line(file, line);
   }
   else if (window->cursor_y) {
     Line* prev_line = file->lines.items[window->cursor_y - 1];
@@ -1464,11 +1119,10 @@ static void delete_character(Window* window) {
     update_window_cursor_x(window, prev_line->chars.count);
     update_window_cursor_y(window, window->cursor_y - 1);
 
-    append_chars(prev_line, line->chars.items, line->chars.count);
-    update_highlight(file, prev_line);
+    char_array_append_multiple(&prev_line->chars, line->chars.items, line->chars.count);
+    render_line(file, prev_line);
 
-    line_array_remove(&window->file->lines, window->cursor_y + 1);
-    file->redraw = true;
+    delete_line(window->file, window->cursor_y + 1);
   }
 
   file->saved = false;
@@ -1476,17 +1130,209 @@ static void delete_character(Window* window) {
 
 //--------------------------------------------------------------------------------------------------
 
-static void delete_character_or_word(Window* window, bool delete_word) {
-  int count = get_delete_count(window, delete_word);
-  debug("Count: %d\n", count);
+static int get_delete_count(Window* window, bool ctrl) {
+  File* file = window->file;
+  Line* line = file->lines.items[window->cursor_y];
+
+  char* data = line->chars.items;
+  int size = window->cursor_x;
+  if (!size) return 1;
+
+  int space_count = 0;
+  int other_count = 0;
+  int char_count = 0;
+
+  for (int i = 0; i < size; i++) {
+    if (data[i] == ' ') {
+      if (space_count == 2) {
+        char_count = 0;
+        other_count = 0;
+      }
+
+      space_count++;
+    }
+    else if (is_indentifier_literal(data[i])) {
+      if (space_count) {
+        char_count = 0;
+      }
+
+      space_count = 0;
+      other_count = 0;
+      char_count++;
+    }
+    else {
+      if (space_count) {
+        other_count = 0;
+      }
+
+      char_count = 0;
+      space_count = 0;
+      other_count++;
+    }
+  }
+
+  bool aligned_to_tab = space_count && (space_count % EditorSpacesPerTab) == 0;
+
+  if (ctrl) {
+    return space_count + char_count + other_count;
+  }
+  else if (aligned_to_tab) {
+    return EditorSpacesPerTab;
+  }
+
+  return 1;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void delete_character_or_word(Window* window, bool ctrl) {
+  int count = get_delete_count(window, ctrl);
   while (count--) {
     delete_character(window);
   }
 }
 
 //--------------------------------------------------------------------------------------------------
+
+static void get_block_marks(Window* window, int* start_x, int* start_y, int* end_x, int* end_y) {
+  if (window->mark_y > window->cursor_y || (window->mark_y == window->cursor_y && window->mark_x > window->cursor_x)) {
+    *start_x = window->cursor_x;
+    *start_y = window->cursor_y;
+
+    *end_x = window->mark_x;
+    *end_y = window->mark_y;
+  }
+  else {
+    *start_x = window->mark_x;
+    *start_y = window->mark_y;
+    
+    *end_x = window->cursor_x;
+    *end_y = window->cursor_y;
+  }
+}
+
 //--------------------------------------------------------------------------------------------------
+
+static void insert_block(Window* window, char* data, int size) {
+  File* file = window->file;
+  Line* line = file->lines.items[window->cursor_y];
+
+  char_array_clear(&buffer);
+  char_array_append_multiple(&buffer, &line->chars.items[window->cursor_x], line->chars.count - window->cursor_x);
+  char_array_truncate(&line->chars, window->cursor_x);
+
+  int line_count = 0;
+  for (int i = 0; i < size; i++) {
+    if (data[i] == '\n') {
+      line_count++;
+    }
+  }
+
+  insert_lines(file, window->cursor_y + 1, line_count);
+
+  int index = 0;
+  int start = 0;
+
+  while (index < size) {
+    while (index < size && data[index] != '\n') {
+      index++;
+    }
+
+    char_array_append_multiple(&line->chars, &data[start], index - start);
+    render_line(file, line);
+
+    if (index >= size) break;
+
+    update_window_cursor_y(window, window->cursor_y + 1);
+    line = file->lines.items[window->cursor_y];
+
+    index++;
+    start = index;
+  }
+
+  update_window_cursor_x(window, line->chars.count);
+
+  if (buffer.count) {
+    char_array_append_multiple(&line->chars, buffer.items, buffer.count);
+    render_line(file, line);
+  }
+}
+
 //--------------------------------------------------------------------------------------------------
+
+static void delete_block(Window* window) {
+  int start_x, start_y, end_x, end_y;
+  get_block_marks(window, &start_x, &start_y, &end_x, &end_y);
+
+  File* file = window->file;
+  Line* line = file->lines.items[start_y];
+
+  char_array_clear(&buffer);
+  char_array_append_multiple(&buffer, line->chars.items, start_x);
+
+  delete_lines(file, start_y, end_y - start_y);
+  line = file->lines.items[start_y];
+
+  char_array_remove_multiple(&line->chars, 0, end_x);
+  char_array_insert_multiple(&line->chars, buffer.items, buffer.count, 0);
+  
+  update_window_cursor_x(window, buffer.count);
+  update_window_cursor_y(window, start_y);
+
+  line->redraw = true;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void copy_block(Window* window) {
+  int start_x, start_y, end_x, end_y;
+  get_block_marks(window, &start_x, &start_y, &end_x, &end_y);
+
+  char_array_clear(&clipboard);
+
+  File* file = window->file;
+  Line* line = file->lines.items[start_y];
+
+  while (start_y != end_y) {
+    char_array_append_multiple(&clipboard, &line->chars.items[start_x], line->chars.count - start_x);
+    char_array_append(&clipboard, '\n');
+    render_line(file, line);
+
+    line = file->lines.items[++start_y];
+    start_x = 0;
+  }
+
+  char_array_append_multiple(&clipboard, &line->chars.items[start_x], end_x - start_x);
+  render_line(file, line);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void cut(Window* window) {
+  copy_block(window);
+  delete_block(window);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void copy(Window* window) {
+  copy_block(window);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void paste(Window* window) {
+  insert_block(window, clipboard.items, clipboard.count);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void enter_minibar_mode(Window* window, int type) {
+  window->minibar_active = true;
+  window->minibar_mode = type;
+  window->error_present = false;
+}
+
 //--------------------------------------------------------------------------------------------------
 
 static void editor_handle_keypress(Window* window, int keycode) {
@@ -1628,22 +1474,19 @@ static void editor_handle_keypress(Window* window, int keycode) {
       break;
 
     case UserKeyCut:
-      handle_cut(window);
+      cut(window);
       break;
 
     case UserKeyCopy:
-      handle_copy(window);
+      copy(window);
       break;
 
     case UserKeyPaste:
-      handle_paste(window);
+      paste(window);
       break;
 
     case UserKeySave:
-      if (!save_file(window->file)) {
-        display_error(window, "can not save file `%.*s`", window->file->path.count, window->file->path.items);
-      }
-
+      if (!save_file(window->file)) display_error(window, "can not save file `%.*s`", window->file->path.count, window->file->path.items);
       break;
 
     default:
@@ -1712,7 +1555,7 @@ static char* get_name(char** data, int* size) {
   char* tmp = *data;
   char* start = tmp;
 
-  while (*tmp && is_name_letter(*tmp)) {  // Note: will accept names which start with numbers.
+  while (*tmp && is_indentifier_literal(*tmp)) {  // Note: will accept names which start with numbers.
     tmp++;
   }
 
@@ -2049,6 +1892,83 @@ static void update() {
     }
   }
 }
+
+//--------------------------------------------------------------------------------------------------
+
+static void render_line(File* file, Line* line) {
+  if (!file || !file->highlight) return;
+
+  line->redraw = true;
+
+  int size = line->chars.count;
+  char* data = line->chars.items;
+  char* end = line->chars.items + size;
+
+  char_array_extend(&line->colors, line->chars.count);
+  line->colors.count = line->chars.count;
+
+  Highlight* highlight = file->highlight;
+
+  int def = ColorTypeEditorForeground;
+  
+  int i = 0;
+
+  int single_size = strlen(highlight->single_line_comment_start);
+  char* single = highlight->single_line_comment_start;
+
+  while (i < size) {
+    char c = data[i];
+
+    while (i < size && c == ' ') {
+      c = data[++i];
+    }
+
+    int remain = size - i;
+
+    if (!remain) break;
+
+    if (is_number(c)) {
+      do {
+        line->colors.items[i] = highlight->numbers ? ColorTypeNumber : def;
+      } while (++i < size && is_number(data[i]));
+    }
+    else if (!memcmp(single, data + i, single_size)) {
+      for (int x = i; x < size; x++) {
+        line->colors.items[x] = ColorTypeComment;
+      }
+      break;
+    }
+    else if (is_letter(c)) {
+      int start = i;
+      while (++i < size && (is_letter(data[i]) || is_number(data[i]) || data[i] == '_'));
+      int size = i - start;
+      int color = def;
+      if (size < MaxKeywordSize) {
+        char** keywords = highlight->keywords[size];
+
+        if (keywords) {
+          while (*keywords) {
+            if (!memcmp(data + start, *keywords, size)) {
+              color = ColorTypeKeyword;
+              debug("matching: %s\n", *keywords);
+              break;
+            }
+            keywords++;
+          }
+        }
+      }
+
+      for (int x = start; x < i; x++) {
+        line->colors.items[x] = color;
+      }
+    }
+    else {
+      line->colors.items[i] = def;
+      i++;
+    }
+  }
+}
+
 
 //--------------------------------------------------------------------------------------------------
 

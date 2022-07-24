@@ -1,6 +1,15 @@
 {
   "files.associations": {
     "algorithm": "c",
-    "string": "c"
+    "string": "c",
+    "*.tcc": "c",
+    "system_error": "c",
+    "random": "c",
+    "limits": "c",
+    "new": "c",
+    "ostream": "c",
+    "stdexcept": "c",
+    "streambuf": "c",
+    "functional": "c"
   }
 }

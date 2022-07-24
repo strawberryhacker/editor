@@ -2,6 +2,8 @@
 
 This is a simple terminal text editor. Some inspiration is taken from Kilo and Emacs. Some features are listed below. 
 
+*(keyboard input, shortcuts are bad because they are read through stdin, also, the editor uses some OSC escape sequences which are not supported by all terminals, and some sequences may be ST (suckless) terminal only, also, it is not stable yet :))*
+
 ## Overview
 
 - Renders only dirty regions.

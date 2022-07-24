@@ -990,7 +990,7 @@ static char get_last_char(Line* line) {
 
 //--------------------------------------------------------------------------------------------------
 
-static void append_spaces(Line* line, int count) {
+static void _append_spaces(Line* line, int count) {
   while (count--) {
     append_char(line, ' ');
   }
@@ -1030,14 +1030,14 @@ static void file_insert_chars(Window* window, char* data, int size, bool smart) 
     if (get_last_char(previous_line) == '{') {
       if (previous_keycode == '{') {
         Line* next_line = insert_line(window->file, window->cursor_y + 1);
-        append_spaces(next_line, spaces);
+        _append_spaces(next_line, spaces);
         append_char(next_line, '}');
       }
 
       spaces += EditorSpacesPerTab;
     }
 
-    append_spaces(line, spaces);
+    _append_spaces(line, spaces);
     window->cursor_x = line->chars.count;
   }
 

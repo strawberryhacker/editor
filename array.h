@@ -89,6 +89,9 @@ static inline void name##_remove(ArrayType* array, int index) {                 
   }                                                                                                                \
                                                                                                                    \
   array->count--;                                                                                                  \
+}                                                                                                                  \
+static inline void name##_truncate(ArrayType* array, int size) {                                                   \
+  array->count = size;                                                                                             \
 }
 
 //--------------------------------------------------------------------------------------------------

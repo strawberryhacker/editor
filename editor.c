@@ -17,7 +17,8 @@ enum {
   WindowMinimumWidth       = 40,
   WindowMinimumHeight      = 10,
 
-  MaxEventHistorySize           = 1024,
+  MaxEventHistorySize      = 1024,
+  MaxKeywordSize           = 32,
 
   MinibarMaxPathWidth      = 20,
   MinibarCommandPadding    = 1,
@@ -262,16 +263,6 @@ struct Action {
 
 //--------------------------------------------------------------------------------------------------
 
-static char* c_keyword_2[] = {"if", 0};
-static char* c_keyword_3[] = {"int", "for", 0};
-static char* c_keyword_4[] = {"case", "else", "true", "char", "void", "bool", 0};
-static char* c_keyword_5[] = {"float", "break", "false", 0};
-static char* c_keyword_6[] = {"static", "struct", "return", 0};
-
-#define MaxKeywordSize 32
-
-//--------------------------------------------------------------------------------------------------
-
 struct Highlight {
   char* extensions[16];
   char** keywords[MaxKeywordSize];
@@ -296,16 +287,24 @@ enum {
 
 //--------------------------------------------------------------------------------------------------
 
+static char* c_keywords_2[] = {"if", 0};
+static char* c_keywords_3[] = {"int", "for", 0};
+static char* c_keywords_4[] = {"case", "else", "true", "char", "void", "bool", 0};
+static char* c_keywords_5[] = {"float", "break", "false", 0};
+static char* c_keywords_6[] = {"static", "struct", "return", 0};
+
+//--------------------------------------------------------------------------------------------------
+
 static Highlight highlights[LanguageCount] = {
   [LanguageC] = {
     .extensions = {".c", 0},
 
     .keywords = {
-      [2] = c_keyword_2,
-      [3] = c_keyword_3,
-      [4] = c_keyword_4,
-      [5] = c_keyword_5,
-      [6] = c_keyword_6,
+      [2] = c_keywords_2,
+      [3] = c_keywords_3,
+      [4] = c_keywords_4,
+      [5] = c_keywords_5,
+      [6] = c_keywords_6,
     },
 
     .single_line_comment_start = "//",
@@ -407,6 +406,8 @@ static WindowArray windows;
 static FileArray files;
 static CharArray clipboard;
 
+static CharArray buffer; // Used for termporary copies.
+
 static bool redraw_line[1024];
 
 static bool running = true;
@@ -431,6 +432,7 @@ static void compile_and_parse_issues();
 static void make_search_lookup(char* data, int size);
 static int search(char* word, int word_length, char* data, int data_length, int* indices);
 static void update_highlight(File* file, Line* line);
+static int get_delete_count(Window* window, bool delete_word);
 
 //--------------------------------------------------------------------------------------------------
 
@@ -932,6 +934,8 @@ static bool is_number(char c) {
 static void update_highlight(File* file, Line* line) {
   if (!file || !file->highlight) return;
 
+  line->redraw = true;
+
   int size = line->chars.count;
   char* data = line->chars.items;
   char* end = line->chars.items + size;
@@ -989,8 +993,6 @@ static void update_highlight(File* file, Line* line) {
           }
         }
       }
-
-      debug("Marking: %d to %d %s\n", start, i, (color == def) ? "[def]" : "[highlight]");
 
       for (int x = start; x < i; x++) {
         line->colors.items[x] = color;
@@ -1154,104 +1156,7 @@ static void update_window_offset_y(Window* window, int offset) {
   window->redraw = true;
 }
 
-//--------------------------------------------------------------------------------------------------
 
-static int get_leading_spaces(Line* line) {
-  int i;
-  for (i = 0; i < line->chars.count && line->chars.items[i] == ' '; i++);
-  return i;
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static char get_last_char(Line* line) {
-  return line->chars.count ? line->chars.items[line->chars.count - 1] : 0;
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void append_spaces(Line* line, int count) {
-  while (count--) {
-    append_char(line, ' ');
-  }
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void file_insert_chars(Window* window, char* data, int size, bool smart) {
-  static CharArray buffer = {0};
-
-  Line* line = window->file->lines.items[window->cursor_y];
-
-  char_array_clear(&buffer);
-  char_array_append_multiple(&buffer, &line->chars.items[window->cursor_x], line->chars.count - window->cursor_x);
-  line->chars.count = window->cursor_x;
-
-  for (int i = 0; i < size; i++) {
-    if (data[i] == '\n') {
-      window->cursor_x = 0;
-      window->cursor_y++;
-      update_highlight(window->file, line);
-      line = insert_line(window->file, window->cursor_y);
-    }
-    else {
-      window->cursor_x++;
-      append_char(line, data[i]);
-    }
-  }
-
-  // Smart indentation.
-  if (smart && size == 1 && data[0] == '\n') {
-    Line* previous_line = window->file->lines.items[window->cursor_y - 1];
-    int spaces = get_leading_spaces(previous_line);
-
-    if (get_last_char(previous_line) == '{') {
-      if (window->previous_keycode == '{') {
-        Line* next_line = insert_line(window->file, window->cursor_y + 1);
-        append_spaces(next_line, spaces);
-        append_char(next_line, '}');
-        update_highlight(window->file, next_line);
-      }
-
-      spaces += EditorSpacesPerTab;
-    }
-
-    append_spaces(line, spaces);
-    window->cursor_x = line->chars.count;
-  }
-
-  append_chars(line, buffer.items, buffer.count);
-  update_highlight(window->file, line);
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void file_insert_char(Window* window, char c, bool smart) {
-  file_insert_chars(window, &c, 1, smart);
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void file_delete_char(Window* window) {
-  Line* current = window->file->lines.items[window->cursor_y];
-
-  if (window->cursor_x) {
-    delete_char(current, window->cursor_x - 1);
-    update_window_cursor_x(window, window->cursor_x - 1);
-  }
-  else if (window->cursor_y) {
-    Line* previous = window->file->lines.items[window->cursor_y - 1];
-
-    update_window_cursor_x(window, previous->chars.count);
-    append_chars(previous, current->chars.items, current->chars.count);
-
-    line_array_remove(&window->file->lines, window->cursor_y);
-    update_window_cursor_y(window, window->cursor_y - 1);
-
-    window->file->redraw = true;
-    window->redraw = true;
-  }
-}
 
 //--------------------------------------------------------------------------------------------------
 
@@ -1269,49 +1174,6 @@ static bool is_name_letter(char c) {
 
 //--------------------------------------------------------------------------------------------------
 
-static int get_delete_count(Window* window, bool delete_word) {
-  Line* line = window->file->lines.items[window->cursor_y];
-  char* data = line->chars.items;
-  int size = window->cursor_y;
-
-  int space_count = 0;
-  int char_count = 0;
-  bool leading = true;
-
-  debug("Line: %.*s\n", size, data);
-
-  for (int i = 0; i < window->cursor_x; i++) {
-    char c = data[i];
-
-    if (c != ' ') {
-      leading = false;
-      space_count = 0;
-    }
-    else {
-      space_count++;
-    }
-
-    if (is_name_letter(c)) {
-      char_count++;
-    }
-    else {
-      char_count = 0;
-    }
-  }
-
-  if (delete_word) {
-    return max(1, max(space_count, char_count));
-  }
-
-  if (leading) {
-    return ((space_count % EditorSpacesPerTab) == 0) ? EditorSpacesPerTab : 1;
-  }
-
-  return 1;
-}
-
-//--------------------------------------------------------------------------------------------------
-
 // Makes sure the start mark comes before the end mark.
 static void normalize_block(int* start_x, int* start_y, int* end_x, int* end_y) {
   if (*start_y > *end_y || (*start_y == *end_y && *start_x > *end_x)) {
@@ -1323,15 +1185,6 @@ static void normalize_block(int* start_x, int* start_y, int* end_x, int* end_y) 
 
     *end_x = tmp_x;
     *end_y = tmp_y;
-  }
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void handle_delete(Window* window, bool delete_word) {
-  int delete_count = get_delete_count(window, delete_word);
-  while (delete_count--) {
-    file_delete_char(window);
   }
 }
 
@@ -1451,7 +1304,7 @@ static void handle_cut(Window* window) {
 }
 
 //--------------------------------------------------------------------------------------------------
-
+static void insert_character(Window* window, char c);
 static void handle_paste(Window* window) {
   if (!window->file || clipboard.count == 0) {
     display_error(window, "paste error");
@@ -1462,22 +1315,183 @@ static void handle_paste(Window* window) {
   window->mark_y = window->cursor_y;
 
   for (int i = 0; i < clipboard.count; i++) {
-    file_insert_char(window, clipboard.items[i], false);
+    insert_character(window, clipboard.items[i]);
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------------------
+
+static void append_spaces(Line* line, int count) {
+  while (count--) {
+    char_array_append(&line->chars, ' ');
   }
 }
 
 //--------------------------------------------------------------------------------------------------
 
-static void update_with_fixed_offset(Window* window, int x, int y) {
-
+static int get_leading_spaces(Line* line) {
+  int i;
+  for (i = 0; i < line->chars.count && line->chars.items[i] == ' '; i++);
+  return i;
 }
 
 //--------------------------------------------------------------------------------------------------
 
+static char get_last_char(Line* line) {
+  return line->chars.count ? line->chars.items[line->chars.count - 1] : 0;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static int get_delete_count(Window* window, bool delete_word) {
+  File* file = window->file;
+  Line* line = file->lines.items[window->cursor_y];
+
+  char* data = line->chars.items;
+  int size = window->cursor_y;
+
+  int space_count = 0;
+  int other_count = 0;
+  int char_count = 0;
+
+  for (int i = 0; i < window->cursor_x; i++) {
+    if (data[i] == ' ') {
+      if (space_count == 2) {
+        char_count = 0;
+        other_count = 0;
+      }
+
+      space_count++;
+    }
+    else if (is_name_letter(data[i])) {
+      if (space_count) {
+        char_count = 0;
+      }
+
+      space_count = 0;
+      other_count = 0;
+      char_count++;
+    }
+    else {
+      if (space_count) {
+        other_count = 0;
+      }
+      
+      char_count = 0;
+      space_count = 0;
+      other_count++;
+    }
+  }
+
+  if (delete_word) {
+    return max(1, space_count + char_count + other_count);
+  }
+  else if ((space_count % EditorSpacesPerTab) == 0) {
+    return EditorSpacesPerTab;
+  }
+
+  return 1;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void insert_character(Window* window, char c) {
+  File* file = window->file;
+  Line* line = file->lines.items[window->cursor_y];
+
+  char_array_insert(&line->chars, c, window->cursor_x++);
+  update_highlight(file, line);
+
+  file->saved = false;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void insert_newline(Window* window) {
+  File* file = window->file;
+  Line* line = file->lines.items[window->cursor_y];
+
+  // Tail of current line is removed and copied to next line.
+  char* tail = &line->chars.items[window->cursor_x];
+  int tail_size = line->chars.count - window->cursor_x;
+  
+  line->chars.count = window->cursor_x;
+  update_highlight(file, line);
+
+  int indent = get_leading_spaces(line);
+
+  if (get_last_char(line) == '{') {
+    if (window->previous_keycode == '{') {
+      line = insert_line(file, window->cursor_y + 1);
+
+      append_spaces(line, indent);
+      char_array_append(&line->chars, '}');
+      update_highlight(file, line);
+    }
+
+    indent += EditorSpacesPerTab;
+  }
+  
+  line = insert_line(file, window->cursor_y + 1);
+
+  append_spaces(line, indent);
+  char_array_append_multiple(&line->chars, tail, tail_size);
+  update_highlight(file, line);
+
+  window->cursor_x = indent;
+  window->cursor_y++;
+
+  file->saved = false;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void delete_character(Window* window) {
+  File* file = window->file;
+  Line* line = file->lines.items[window->cursor_y];
+
+  if (window->cursor_x) {
+    char_array_remove(&line->chars, window->cursor_x - 1);
+    update_window_cursor_x(window, window->cursor_x - 1);
+    update_highlight(file, line);
+  }
+  else if (window->cursor_y) {
+    Line* prev_line = file->lines.items[window->cursor_y - 1];
+
+    update_window_cursor_x(window, prev_line->chars.count);
+    update_window_cursor_y(window, window->cursor_y - 1);
+
+    append_chars(prev_line, line->chars.items, line->chars.count);
+    update_highlight(file, prev_line);
+
+    line_array_remove(&window->file->lines, window->cursor_y + 1);
+    file->redraw = true;
+  }
+
+  file->saved = false;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void delete_character_or_word(Window* window, bool delete_word) {
+  int count = get_delete_count(window, delete_word);
+  debug("Count: %d\n", count);
+  while (count--) {
+    delete_character(window);
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------------------
+
 static void editor_handle_keypress(Window* window, int keycode) {
   if (window->file && KeyCodePrintableStart <= keycode && keycode <= KeyCodePrintableEnd) {
-    file_insert_char(window, keycode, true);
-    window->file->saved = false;
+    insert_character(window, (char)keycode);
   }
   else if (keycode == UserKeyOpen) {
     enter_minibar_mode(window, MinibarModeOpen);
@@ -1563,7 +1577,7 @@ static void editor_handle_keypress(Window* window, int keycode) {
       break;
 
     case KeyCodeCtrlDelete:
-      handle_delete(window, true);
+      delete_character_or_word(window, true);
       break;
 
     case KeyCodeCtrlF:
@@ -1574,19 +1588,17 @@ static void editor_handle_keypress(Window* window, int keycode) {
       break;
 
     case KeyCodeDelete:
-      handle_delete(window, false);
+      delete_character_or_word(window, false);
       break;
 
     case KeyCodeTab:
-      window->file->saved = false;
       for (int i = 0; i < EditorSpacesPerTab; i++) {
-        file_insert_char(window, ' ', true);
+        insert_character(window, ' ');
       }
       break;
 
     case KeyCodeEnter:
-      window->file->saved = false;
-      file_insert_char(window, '\n', true);
+      insert_newline(window);
       break;
 
     case UserKeyFocusNext:

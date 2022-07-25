@@ -76,23 +76,23 @@ static const struct { const char* name; int colors[ColorTypeCount]; } themes[Col
   [ColorThemeDefault] = {
     .name = "default",
     .colors = {
-      [ColorTypeEditorCursor]            = 0x93a1a1,
-      [ColorTypeEditorForeground]        = 0x93a1a1,
-      [ColorTypeEditorBackground]        = 0xfdf6e3,
-      [ColorTypeMinibarCursor]           = 0xfdf6e3,
-      [ColorTypeMinibarForeground]       = 0xfdf6e3,
-      [ColorTypeMinibarBackground]       = 0x93a1a1,
-      [ColorTypeMinibarError]            = 0xdc322f,
-      [ColorTypeSelectedMatchForeground] = 0xff0000,
-      [ColorTypeSelectedMatchBackground] = 0x00ff00,
-      [ColorTypeMatchForeground]         = 0x000000,
+      [ColorTypeEditorCursor]            = 0x000000,
+      [ColorTypeEditorForeground]        = 0x000000,
+      [ColorTypeEditorBackground]        = 0xffffff,
+      [ColorTypeMinibarCursor]           = 0x082626,
+      [ColorTypeMinibarForeground]       = 0x082626,
+      [ColorTypeMinibarBackground]       = 0xd6b58d,
+      [ColorTypeMinibarError]            = 0xff0000,
+      [ColorTypeSelectedMatchForeground] = 0x082626,
+      [ColorTypeSelectedMatchBackground] = 0xd1b897,
+      [ColorTypeMatchForeground]         = 0x082626,
       [ColorTypeMatchBackground]         = 0x0a3f4a,
       [ColorTypeComment]                 = 0x44b340,
-      [ColorTypeMultilineComment]        = 0xff0000,
-      [ColorTypeKeyword]                 = 0xff0000,
-      [ColorTypeString]                  = 0xff0000,
+      [ColorTypeMultilineComment]        = 0x00ff00,
+      [ColorTypeKeyword]                 = 0x8cde94,
+      [ColorTypeString]                  = 0xc1d1e3,
       [ColorTypeChar]                    = 0xff0000,
-      [ColorTypeNumber]                  = 0xff0000,
+      [ColorTypeNumber]                  = 0xc1d1e3,
     },
   },
 
@@ -108,12 +108,12 @@ static const struct { const char* name; int colors[ColorTypeCount]; } themes[Col
       [ColorTypeMinibarError]            = 0xff0000,
       [ColorTypeSelectedMatchForeground] = 0x082626,
       [ColorTypeSelectedMatchBackground] = 0xd1b897,
-      [ColorTypeMatchForeground]         = 0xd1b897,
+      [ColorTypeMatchForeground]         = 0x082626,
       [ColorTypeMatchBackground]         = 0x0a3f4a,
       [ColorTypeComment]                 = 0x44b340,
       [ColorTypeMultilineComment]        = 0x00ff00,
       [ColorTypeKeyword]                 = 0x8cde94,
-      [ColorTypeString]                  = 0xff0000,
+      [ColorTypeString]                  = 0xc1d1e3,
       [ColorTypeChar]                    = 0xff0000,
       [ColorTypeNumber]                  = 0xc1d1e3,
     },
@@ -262,15 +262,11 @@ struct Action {
   int x;
   int y;
 
-  union {
-    char c;
-    char* data;
-
-    struct {
-      int end_x;
-      int end_y;
-    };
-  };
+  int end_x;
+  int end_y;
+  
+  char c;
+  char* data;
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -303,7 +299,9 @@ static char* c_keywords_2[] = {"if", 0};
 static char* c_keywords_3[] = {"int", "for", 0};
 static char* c_keywords_4[] = {"case", "else", "true", "char", "void", "bool", 0};
 static char* c_keywords_5[] = {"float", "break", "false", "while", 0};
-static char* c_keywords_6[] = {"static", "struct", "return", 0};
+static char* c_keywords_6[] = {"static", "struct", "return", "#endif", 0};
+static char* c_keywords_7[] = {"#define", "#ifndef", 0};
+static char* c_keywords_8[] = {"#include", 0};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -317,6 +315,8 @@ static Highlight highlights[LanguageCount] = {
       [4] = c_keywords_4,
       [5] = c_keywords_5,
       [6] = c_keywords_6,
+      [7] = c_keywords_7,
+      [8] = c_keywords_8,
     },
 
     .single_line_comment_start = "//",
@@ -451,6 +451,14 @@ static int current_theme = ColorThemeJonBlow;
 int current_foreground_type = -1;
 int current_background_type = -1;
 
+// Temporary undo state.
+int undo_type;
+int undo_start_x;
+int undo_start_y;
+int undo_current_x;
+int undo_current_y;
+static String undo_buffer;
+
 //--------------------------------------------------------------------------------------------------
 
 static void delete_line(File* file, int index);
@@ -467,7 +475,6 @@ static void make_find_lookup(char* data, int size);
 static int find(char* word, int word_length, char* data, int data_length);
 static void render_line(File* file, Line* line);
 static int get_delete_count(Window* window, char* data, int cursor, bool ctrl);
-static void render_line(File* file, Line* line);
 static void change_file(Window* window, File* file);
 
 //--------------------------------------------------------------------------------------------------
@@ -481,7 +488,7 @@ static void debug(const char* data, ...) {
   va_end(arguments);
 
   // Run tty in a remote terminal to get the path.
-  FILE* fd = fopen("/dev/pts/0", "w");
+  FILE* fd = fopen("/dev/pts/1", "w");
   assert(fd > 0);
 
   fwrite(buffer, 1, size, fd);
@@ -630,9 +637,6 @@ static void set_background_color(int type) {
 static void set_foreground_color(int type) {
   if (type == current_foreground_type) return;
   int color = themes[current_theme].colors[type];
-  if (color == 0) {
-    color = 0xff0000;
-  }
   current_foreground_type = type;
   print("\x1b[38;2;%d;%d;%dm", (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
 }
@@ -724,6 +728,31 @@ static int get_input() {
   }
 
   return code;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static int command(const char* command, String* data) {
+  const int max_buffer = 256;
+  char buffer[max_buffer];
+
+  FILE* stream = popen(command, "r");
+  if (stream) {
+    while (!feof(stream)) {
+      printf("Testn\n");
+      if (fgets(buffer, max_buffer, stream) != NULL) {
+        printf("Test\n");
+        char* tmp = buffer;
+        while (*tmp) {
+          string_append(data, *tmp++);
+        }
+      }
+    }
+
+    return (pclose(stream) >> 8) && 0xff;
+  }
+
+  return -1;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -904,7 +933,7 @@ static File* open_file(char* path, int path_size) {
 
   file = allocate_file(path, path_size);
 
- line_array_extend(&file->lines, line_count);
+  line_array_extend(&file->lines, line_count);
   Line* line = insert_line(file, 0);
 
   cr = 0;
@@ -1475,6 +1504,9 @@ static void exit_minibar_mode(Window* window) {
 
 //--------------------------------------------------------------------------------------------------
 
+
+//--------------------------------------------------------------------------------------------------
+
 static void editor_handle_keypress(Window* window, int keycode) {
   if (keycode == UserKeyOpen) {
     enter_minibar_mode(window, MinibarModeOpen);
@@ -1667,6 +1699,8 @@ static void make_find_lookup(char* data, int size) {
 //--------------------------------------------------------------------------------------------------
 
 static int find(char* word, int word_length, char* data, int data_length) {
+  //debug("Worrd length: %d\n", word_length);
+  //debug("Find: %.*s in %.*s [%d %d]\n", word_length, word, data_length, data, word_length, data_length);
   int data_index = word_length - 1;
   int matches = 0;
 
@@ -1690,6 +1724,8 @@ static int find(char* word, int word_length, char* data, int data_length) {
     int skip = match_count ? find_index_lookup[match_count] : find_char_lookup[(int)data[data_index]];
     data_index = tmp_data_index + skip;
   }
+
+  //debug("Done\n");
 
   return matches;
 }
@@ -1736,7 +1772,6 @@ static void find_in_file(Window* window) {
 
   for (int i = 0; i < file->lines.count; i++) {
     Line* line = file->lines.items[i];
-
     int count = find(data, size, line->chars.items, line->chars.count);
 
     total_matches += count;
@@ -1748,6 +1783,7 @@ static void find_in_file(Window* window) {
     if (input_is_pending()) {
       match_array_clear(&window->matches); // Can't render nothing.
       interrupted = true;
+      debug("Interrupt\n");
       break;
     }
   }
@@ -1757,7 +1793,7 @@ static void find_in_file(Window* window) {
 
     for (int i = 0; i < window->matches.count; i++) {
       Match* pos = &window->matches.items[i];
-      debug("Match at: (%d, %d)\n", pos->x, pos->y);
+      //debug("Match at: (%d, %d)\n", pos->x, pos->y);
     }
 
     // Go through and select the closest match to the current cursor.
@@ -1974,6 +2010,7 @@ static void minibar_handle_keypress(Window* window, int keycode) {
       window->cursor_x = window->saved_cursor_x;
       window->cursor_y = window->saved_cursor_y;
       window->matches.count = 0; // Disable find. Do something better.
+      window->redraw = true;
       exit_minibar_mode(window);
       break;
 
@@ -1994,6 +2031,22 @@ static void minibar_handle_keypress(Window* window, int keycode) {
       if (window->minibar_mode == MinibarModeFind) {
         if (window->matches.count) {
           if (++window->match_index == window->matches.count) window->match_index = 0;
+          set_cursor_based_on_position(window);
+        }
+      }
+      break;
+
+    case KeyCodeCtrlDown:
+      if (window->minibar_mode == MinibarModeFind) {
+        if (window->matches.count) {
+          int increment = 1 + (window->matches.count / 50);
+
+          window->match_index += increment;
+
+          if (window->match_index >= window->matches.count) {
+            window->match_index -= window->matches.count;
+          }
+
           set_cursor_based_on_position(window);
         }
       }
@@ -2089,15 +2142,12 @@ static void render_line(File* file, Line* line) {
   int single_size = strlen(highlight->single_line_comment_start);
   char* single = highlight->single_line_comment_start;
 
-  int tmp = 0;
-
   while (i < size) {
     char c = data[i];
 
     while (i < size && c == ' ') {
       line->colors.items[i] = def;
       i++;
-      tmp++;
       c = data[i];
     }
 
@@ -2108,13 +2158,22 @@ static void render_line(File* file, Line* line) {
     if (is_number(c)) {
       do {
         line->colors.items[i] = highlight->numbers ? ColorTypeNumber : def;
-        tmp++;
-      } while (++i < size && is_number(data[i]));
+        i++;
+      } while (i < size && is_number(data[i]));
+    }
+    else if (c == '"') {
+      do {
+        line->colors.items[i] = highlight->strings ? ColorTypeString : def;
+        i++;
+      } while (i < size && data[i] != '"');
+      if (i < size) {
+        line->colors.items[i] = highlight->strings ? ColorTypeString : def;
+        ++i;
+      }
     }
     else if (!memcmp(single, data + i, single_size)) {
       for (int x = i; x < size; x++) {
         line->colors.items[x] = ColorTypeComment;
-        tmp++;
       }
       break;
     }
@@ -2142,17 +2201,13 @@ static void render_line(File* file, Line* line) {
 
       for (int x = start; x < i; x++) {
         line->colors.items[x] = color;
-        tmp++;
       }
     }
     else {
       line->colors.items[i] = def;
-      tmp++;
       i++;
     }
   }
-
-  assert(tmp == size);
 
   assert(line->colors.count == line->chars.count);
 
@@ -2316,8 +2371,7 @@ static void render_window(Window* window) {
             if (++current_index == window->matches.count) current_index = 0;
           }
         }
-
-        if (file->highlight) {
+        else if (file->highlight) {
           set_foreground_color(line->colors.items[index]);
         }
 
@@ -2673,6 +2727,16 @@ static void editor_init() {
 //--------------------------------------------------------------------------------------------------
 
 int main() {
+
+  String data = {0};
+  int status = command("git add . 2>&1", &data);
+  status = command("git commit -m \"testing git\" 2>&1", &data);
+
+
+
+  printf("Got status: %d [%.*s]\n", status, data.count, data.items);
+  return 0;
+
   terminal_init();
   editor_init();
 

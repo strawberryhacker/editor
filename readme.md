@@ -36,3 +36,5 @@ This is a simple terminal text editor. Some inspiration is taken from Kilo and E
 - Reindent block.
 - Reformat comments to have a linesize.
 - Exiting while unsaved changes exist triggers save confirmation.
+- Save all command
+- Github commit commandaosenuth

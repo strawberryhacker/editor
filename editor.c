@@ -733,20 +733,17 @@ static int get_input() {
 //--------------------------------------------------------------------------------------------------
 
 static int command(const char* command, String* data) {
-  const int max_buffer = 256;
-  char buffer[max_buffer];
+  static char silent_command[1024];
 
-  FILE* stream = popen(command, "r");
+  strcpy(silent_command, command);
+  strcat(silent_command, " 2>&1");
+
+  FILE* stream = popen(silent_command, "r");
+
   if (stream) {
     while (!feof(stream)) {
-      printf("Testn\n");
-      if (fgets(buffer, max_buffer, stream) != NULL) {
-        printf("Test\n");
-        char* tmp = buffer;
-        while (*tmp) {
-          string_append(data, *tmp++);
-        }
-      }
+      string_extend(data, data->count + 64);
+      data->count += fread(&data->items[data->count], 1, 64, stream);
     }
 
     return (pclose(stream) >> 8) && 0xff;
@@ -2729,10 +2726,10 @@ static void editor_init() {
 int main() {
 
   String data = {0};
-  int status = command("git add . 2>&1", &data);
-  status = command("git commit -m \"testing git\" 2>&1", &data);
+  int status = command("git add \\.", &data);
+  printf("Got status: %d [%.*s]\n", status, data.count, data.items);
 
-
+  status = command("git commit m \"testing git\"", &data);
 
   printf("Got status: %d [%.*s]\n", status, data.count, data.items);
   return 0;

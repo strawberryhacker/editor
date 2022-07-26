@@ -732,24 +732,13 @@ static int get_input() {
 
 //--------------------------------------------------------------------------------------------------
 
-static int command(const char* command, String* data) {
-  static char silent_command[1024];
+static bool git_commit(const char* message, int size) {
+  char data[256];
+  snprintf(data, 256, "git add . && git commit -m \"%.*s\"", size, message);
 
-  strcpy(silent_command, command);
-  strcat(silent_command, " 2>&1");
+  printf("Command: %s\n", data);
 
-  FILE* stream = popen(silent_command, "r");
-
-  if (stream) {
-    while (!feof(stream)) {
-      string_extend(data, data->count + 64);
-      data->count += fread(&data->items[data->count], 1, 64, stream);
-    }
-
-    return (pclose(stream) >> 8) && 0xff;
-  }
-
-  return -1;
+  return system(data) == 0; 
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -2724,16 +2713,8 @@ static void editor_init() {
 //--------------------------------------------------------------------------------------------------
 
 int main() {
-
-  String data = {0};
-  int status = command("git add \\.", &data);
-  printf("Got status: %d [%.*s]\n", status, data.count, data.items);
-
-  status = command("git commit m \"testing git\"", &data);
-
-  printf("Got status: %d [%.*s]\n", status, data.count, data.items);
+  printf("test: %d\n", git_commit("Git commit test", 15));
   return 0;
-
   terminal_init();
   editor_init();
 

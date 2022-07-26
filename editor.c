@@ -734,10 +734,7 @@ static int get_input() {
 
 static bool git_commit(const char* message, int size) {
   char data[256];
-  snprintf(data, 256, "git add . && git commit -m \"%.*s\"", size, message);
-
-  printf("Command: %s\n", data);
-
+  snprintf(data, 256, "git add . && git commit -m \"%.*s\" > /dev/null", size, message);
   return system(data) == 0; 
 }
 
@@ -2713,7 +2710,7 @@ static void editor_init() {
 //--------------------------------------------------------------------------------------------------
 
 int main() {
-  printf("test: %d\n", git_commit("Git commit test", 15));
+  printf("test: %d\n", git_commit("Another commit", 14));
   return 0;
   terminal_init();
   editor_init();

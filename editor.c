@@ -17,7 +17,7 @@ enum {
   WindowMinimumWidth       = 40,
   WindowMinimumHeight      = 10,
 
-  MaxEventHistorySize      = 1024,
+  MaxActionCount           = 1024,
   MaxKeywordSize           = 32,
   MaxFindLength            = 1024,
   MaxLineLength            = 1024, // Has to do with the find.
@@ -226,6 +226,7 @@ typedef struct Action Action;
 typedef struct Highlight Highlight;
 typedef struct FileState FileState;
 typedef struct Match Match;
+typedef struct Undo Undo;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -252,21 +253,6 @@ struct Line {
   IntArray colors;
 
   bool redraw;
-};
-
-//--------------------------------------------------------------------------------------------------
-
-struct Action {
-  int type;
-
-  int x;
-  int y;
-
-  int end_x;
-  int end_y;
-  
-  char c;
-  char* data;
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -333,22 +319,37 @@ static Highlight highlights[LanguageCount] = {
 
 //--------------------------------------------------------------------------------------------------
 
+struct Action {
+  unsigned char type;
+  unsigned char flags;
+  char* data;
+  int size;
+  int x;
+  int y;
+};
+
+//--------------------------------------------------------------------------------------------------
+
+struct Undo {
+  Action actions[MaxActionCount];
+  int index;
+  int head;
+  int tail;
+
+  String buffer;
+  int x;
+  int y;
+  bool delete;
+};
+
+//--------------------------------------------------------------------------------------------------
+
 struct File {
   String path;
   LineArray lines;
 
   bool redraw;
   bool saved;
-
-  Action history[MaxEventHistorySize];
-
-  int newest_index;
-  int oldest_index;
-  int current_index;
-
-  // Track the last change to be able to merge changes.
-  int chunk_x;
-  int chunk_y;
 
   Highlight* highlight;
 };

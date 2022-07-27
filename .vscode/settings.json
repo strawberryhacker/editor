@@ -11,6 +11,13 @@
     "stdexcept": "c",
     "streambuf": "c",
     "functional": "c",
-    "cstdlib": "c"
+    "cstdlib": "c",
+    "atomic": "c",
+    "cmath": "c",
+    "unordered_map": "c",
+    "optional": "c",
+    "ranges": "c",
+    "tuple": "c",
+    "type_traits": "c"
   }
 }

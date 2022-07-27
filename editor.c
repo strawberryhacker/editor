@@ -143,6 +143,8 @@ enum {
   KeyCodeCtrlE          = 5,
   KeyCodeCtrlU          = 21,
   KeyCodeCtrlF          = 6,
+  KeyCodeCtrlZ          = 26,
+  KeyCodeCtrlY          = 25,
 
   KeyCodePrintableStart = 32,
   KeyCodePrintableEnd   = 126,
@@ -188,6 +190,8 @@ enum {
   UserKeyCopy          = KeyCodeCtrlC,
   UserKeyPaste         = KeyCodeCtrlV,
   UserKeyCut           = KeyCodeCtrlX,
+  UserKeyUndo          = KeyCodeCtrlZ,
+  UserKeyRedo          = KeyCodeCtrlY,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -319,9 +323,25 @@ static Highlight highlights[LanguageCount] = {
 
 //--------------------------------------------------------------------------------------------------
 
+enum {
+  ActionTypeInsert,
+  ActionTypeDelete,
+  ActionTypeInsertNewline,
+  ActionTypeDeleteNewline,
+  ActionTypeCount,
+};
+
+enum {
+  ActionFlagCoordinateIsCursor      = 1 << 0,
+  ActionFlagKeycodeWasBrace = 1 << 1,
+};
+
+//--------------------------------------------------------------------------------------------------
+
 struct Action {
   unsigned char type;
   unsigned char flags;
+  unsigned char joint;
   char* data;
   int size;
   int x;
@@ -337,9 +357,9 @@ struct Undo {
   int tail;
 
   String buffer;
+  bool delete;
   int x;
   int y;
-  bool delete;
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -347,11 +367,11 @@ struct Undo {
 struct File {
   String path;
   LineArray lines;
+  Undo undo;
+  Highlight* highlight;
 
   bool redraw;
   bool saved;
-
-  Highlight* highlight;
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -395,7 +415,6 @@ struct FileState {
 struct Window {
   File* file;
   Region* region;
-
   FileStateArray file_states;
 
   bool redraw;
@@ -439,6 +458,8 @@ static Region master_region;
 static WindowArray windows;
 static FileArray files;
 static String clipboard;
+static bool clipboard_cursor_goes_before_data;
+
 static String buffer;
 
 static int find_char_lookup[256];
@@ -451,14 +472,6 @@ static int current_theme = ColorThemeJonBlow;
 
 int current_foreground_type = -1;
 int current_background_type = -1;
-
-// Temporary undo state.
-int undo_type;
-int undo_start_x;
-int undo_start_y;
-int undo_current_x;
-int undo_current_y;
-static String undo_buffer;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -477,6 +490,7 @@ static int find(char* word, int word_length, char* data, int data_length);
 static void render_line(File* file, Line* line);
 static int get_delete_count(Window* window, char* data, int cursor, bool ctrl);
 static void change_file(Window* window, File* file);
+static void handle_action(Window* window, Action* action, bool undo);
 
 //--------------------------------------------------------------------------------------------------
 
@@ -853,7 +867,7 @@ static void delete_lines(File* file, int index, int count) {
     free(line);
   }
 
- line_array_remove_multiple(&file->lines, index, count);
+  line_array_remove_multiple(&file->lines, index, count);
   file->redraw = true;
 }
 
@@ -1172,14 +1186,94 @@ static void update_window_offset_y(Window* window, int offset) {
 
 //--------------------------------------------------------------------------------------------------
 
-static void insert_character(Window* window, char c) {
-  File* file = window->file;
-  Line* line = file->lines.items[window->cursor_y];
+static void print_action(Action* action) {
+  switch (action->type) {
+    case ActionTypeInsert:
+      debug("[%d %d] insert: [%d] %.*s\n", action->x, action->y, action->size, action->size, action->data);
+      break;
+    case ActionTypeDelete:
+      debug("[%d %d] delete: [%d] %.*s\n", action->x, action->y, action->size, action->size, action->data);
+      break;
+    case ActionTypeInsertNewline:
+      debug("[%d %d] insert newline\n", action->x, action->y);
+      break;
+    case ActionTypeDeleteNewline:
+      debug("[%d %d] delete newline\n", action->x, action->y);
+      break;
+  }
+}
 
-  string_insert(&line->chars, c, window->cursor_x++);
-  render_line(file, line);
+//--------------------------------------------------------------------------------------------------
 
-  file->saved = false;
+static Action* get_next_action(Window* window) {
+  Undo* undo = &window->file->undo;
+
+  if (++undo->index == MaxActionCount) undo->index = 0;
+  undo->head = undo->index;
+
+  return &undo->actions[undo->index];
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void set_action_data(Action* action, char* data, int size, bool reverse) {
+  if (action->data) {
+    free(action->data);
+  }
+
+  action->data = malloc(size);
+  action->size = size;
+
+  if (reverse) {
+    for (int i = 0; i < size; i++) {
+      action->data[i] = data[size - i - 1];
+    }
+  }
+  else {
+    memcpy(action->data, data, size);
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void push_action(Window* window) {
+  Undo* undo = &window->file->undo;
+  if (!undo->buffer.count) return;
+
+  Action* action = get_next_action(window);
+
+  if (undo->delete) {
+    action->type = ActionTypeDelete;
+    action->x = undo->x;
+    action->y = undo->y;
+    set_action_data(action, undo->buffer.items, undo->buffer.count, true);
+  }
+  else {
+    
+    action->type = ActionTypeInsert;
+    action->x = undo->x - (undo->buffer.count - 1);
+    action->y = undo->y;
+    set_action_data(action, undo->buffer.items, undo->buffer.count, false);
+  }
+
+  string_clear(&undo->buffer);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void get_end_mark(char* data, int size, int x, int y, int* end_x, int* end_y) {
+  for (int i = 0; i < size; i++) {
+    if (data[i] == '\n') {
+      y++;
+      x = 0;
+    }
+    else {
+      x++;
+    }
+  }
+
+  *end_x = x;
+  *end_y = y;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1206,63 +1300,389 @@ static char get_last_char(Line* line) {
 
 //--------------------------------------------------------------------------------------------------
 
-static void insert_newline(Window* window) {
+static void get_block_marks(Window* window, int* start_x, int* start_y, int* end_x, int* end_y) {
+  if (window->mark_y > window->cursor_y || (window->mark_y == window->cursor_y && window->mark_x > window->cursor_x)) {
+    *start_x = window->cursor_x;
+    *start_y = window->cursor_y;
+
+    *end_x = window->mark_x;
+    *end_y = window->mark_y;
+  }
+  else {
+    *start_x = window->mark_x;
+    *start_y = window->mark_y;
+    
+    *end_x = window->cursor_x;
+    *end_y = window->cursor_y;
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void insert_block(Window* window, char* data, int size, int start_x, int start_y, int* end_x, int* end_y) {
+  debug("Insert %d [%.*s] %d %d\n", size, size, data, start_x, start_y);
+  if (data[0] == '\n') {
+    debug("Ok\n");
+  }
   File* file = window->file;
-  Line* line = file->lines.items[window->cursor_y];
+  Line* line = file->lines.items[start_y];
 
-  char* tail = &line->chars.items[window->cursor_x];
-  int tail_size = line->chars.count - window->cursor_x;
-  
-  string_truncate(&line->chars, window->cursor_x);
+  string_clear(&buffer);
+  string_append_multiple(&buffer, &line->chars.items[start_x], line->chars.count - start_x);
+  string_truncate(&line->chars, start_x);
+
+  int line_count = 0;
+  for (int i = 0; i < size; i++) {
+    if (data[i] == '\n') {
+      line_count++;
+    }
+  }
+
+  insert_lines(file, start_y + 1, line_count);
+
+  int index = 0;
+  int start = 0;
+
+  while (index < size) {
+    while (index < size && data[index] != '\n') {
+      index++;
+    }
+
+    string_append_multiple(&line->chars, &data[start], index - start);
+    render_line(file, line);
+
+    if (index >= size) break;
+
+    line = file->lines.items[++start_y];
+
+    index++;
+    start = index;
+  }
+
+  *end_x = line->chars.count;
+  *end_y = start_y;
+
+  debug("Insert %d %d %d %d\n", start_x, start_y, *end_x, *end_y);
+
+  if (buffer.count) {
+    string_append_multiple(&line->chars, buffer.items, buffer.count);
+    render_line(file, line);
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void delete_block(Window* window, int start_x, int start_y, int end_x, int end_y) {
+  File* file = window->file;
+  Line* line = file->lines.items[start_y];
+
+  string_clear(&buffer);
+  string_append_multiple(&buffer, line->chars.items, start_x);
+
+  delete_lines(file, start_y, end_y - start_y);
+  line = file->lines.items[start_y];
+
+  string_remove_multiple(&line->chars, 0, end_x);
+  string_insert_multiple(&line->chars, buffer.items, buffer.count, 0);
   render_line(file, line);
+  
+  update_window_cursor_x(window, buffer.count);
+  update_window_cursor_y(window, start_y);
 
-  int indent = get_leading_spaces(line);
+  line->redraw = true;
+}
 
-  if (get_last_char(line) == '{') {
-    if (window->previous_keycode == '{') {
-      line = insert_line(file, window->cursor_y + 1);
+//--------------------------------------------------------------------------------------------------
 
-      append_spaces(line, indent);
-      string_append(&line->chars, '}');
-      render_line(file, line);
+static void copy_block(Window* window, int start_x, int start_y, int end_x, int end_y) {
+  if (start_x == window->cursor_x) {
+    clipboard_cursor_goes_before_data = true;
+  }
+
+  string_clear(&clipboard);
+
+  File* file = window->file;
+  Line* line = file->lines.items[start_y];
+
+  while (start_y != end_y) {
+    string_append_multiple(&clipboard, &line->chars.items[start_x], line->chars.count - start_x);
+    string_append(&clipboard, '\n');
+    render_line(file, line);
+
+    line = file->lines.items[++start_y];
+    start_x = 0;
+  }
+
+  string_append_multiple(&clipboard, &line->chars.items[start_x], end_x - start_x);
+  render_line(file, line);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void handle_action_type_insert(Window* window, Action* action, bool undo) {
+  int start_x = action->x;
+  int start_y = action->y;
+
+  int end_x, end_y;
+  get_end_mark(action->data, action->size, start_x, start_y, &end_x, &end_y);
+
+  if (undo) {
+    delete_block(window, start_x, start_y, end_x, end_y);
+    update_window_cursor_x(window, start_x);
+    update_window_cursor_y(window, start_y);
+  }
+  else {
+    insert_block(window, action->data, action->size, start_x, start_y, &end_x, &end_y);
+    if (action->flags & ActionFlagCoordinateIsCursor) {
+      update_window_cursor_x(window, start_x);
+      update_window_cursor_y(window, start_y);
+    }
+    else {
+      update_window_cursor_x(window, end_x);
+      update_window_cursor_y(window, end_y);
+    }
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void handle_action_type_delete(Window* window, Action* action, bool undo) {
+  int start_x = action->x;
+  int start_y = action->y;
+
+  int end_x, end_y;
+  get_end_mark(action->data, action->size, start_x, start_y, &end_x, &end_y);
+
+  if (undo) {
+    insert_block(window, action->data, action->size, start_x, start_y, &end_x, &end_y);
+    update_window_cursor_x(window, end_x);
+    update_window_cursor_y(window, end_y);
+  }
+  else {
+    delete_block(window, start_x, start_y, end_x, end_y);
+    update_window_cursor_x(window, start_x);
+    update_window_cursor_y(window, start_y);
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void handle_action_type_insert_newline(Window* window, Action* action, bool undo) {
+  File* file = window->file;
+  Line* line = file->lines.items[action->y];
+
+  int line_count = 1;
+  int original_indent = get_leading_spaces(line);
+  int indent = original_indent;
+
+  // Detect indentation and brace.
+  if (action->x && line->chars.items[action->x - 1] == '{') {
+    if (action->x == line->chars.count && (action->flags & ActionFlagKeycodeWasBrace)) {
+      line_count = 2;
     }
 
     indent += EditorSpacesPerTab;
   }
-  
-  line = insert_line(file, window->cursor_y + 1);
+  debug("-----Linecount: %d\n", line_count);
+  debug("%d %d \n", action->x, line->chars.count);
 
-  append_spaces(line, indent);
-  string_append_multiple(&line->chars, tail, tail_size);
-  render_line(file, line);
+  if (undo) {
+    debug("Linecount: %d\n", line_count);
+    Line* next = file->lines.items[action->y + 1];
+    string_append_multiple(&line->chars, &next->chars.items[indent], next->chars.count - indent);
+    render_line(file, line);
+    delete_lines(file, action->y + 1, line_count);
+    update_window_cursor_x(window, action->x);
+    update_window_cursor_y(window, action->y);
+  }
+  else {
+    char* tail = &line->chars.items[action->x];
+    int tail_size = line->chars.count - action->x;
+    
+    string_truncate(&line->chars, action->x);
+    render_line(file, line);
 
-  window->cursor_x = indent;
-  window->cursor_y++;
+    if (line_count == 2) {
+      line = insert_line(file, action->y + 1);
+      append_spaces(line, original_indent);
+      string_append(&line->chars, '}');
+      render_line(file, line);
+    }
+
+    line = insert_line(file, action->y + 1);
+    append_spaces(line, indent);
+    string_append_multiple(&line->chars, tail, tail_size);
+    render_line(file, line);
+
+    update_window_cursor_x(window, indent);
+    update_window_cursor_y(window, action->y + 1);
+  }
 
   file->saved = false;
 }
 
 //--------------------------------------------------------------------------------------------------
 
-static void delete_character(Window* window) {
+static void handle_action_type_delete_newline(Window* window, Action* action, bool undo) {
+  char c = '\n';
+  Action tmp = *action;
+  tmp.data = &c;
+  tmp.size = 1;
+  tmp.type = ActionTypeDelete;
+  handle_action(window, &tmp, undo);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void handle_action(Window* window, Action* action, bool undo) {
+  switch (action->type) {
+    case ActionTypeInsert:
+      handle_action_type_insert(window, action, undo);
+      break;
+
+    case ActionTypeDelete:
+      handle_action_type_delete(window, action, undo);
+      break;
+
+    case ActionTypeInsertNewline:
+      handle_action_type_insert_newline(window, action, undo);
+      break;
+
+    case ActionTypeDeleteNewline:
+      handle_action_type_delete_newline(window, action, undo);
+      break;
+  }
+
+  debug("\n----------------------------\n");
+  Undo* u = &window->file->undo;
+  for (int i = u->tail + 1; i <= u->index; i++) {
+    debug("%2d - ", i);
+    print_action(&u->actions[i]);
+  }
+  debug("Buffer [%d]: %.*s\n", u->buffer.count, u->buffer.count, u->buffer.items);
+  debug("----------------------------\n");
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void handle_undo(Window* window) {
+  Undo* undo = &window->file->undo;
+  
+  if (undo->buffer.count) {
+    push_action(window);
+  }
+  
+  if (undo->index == undo->tail) return;
+
+  Action* action = &undo->actions[undo->index];
+  if (--undo->index < 0) undo->index = MaxActionCount - 1;
+
+  handle_action(window, action, true);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void handle_redo(Window* window) {
+  Undo* undo = &window->file->undo;
+  if (undo->buffer.count) {
+    push_action(window);
+  }
+  
+  if (undo->index == undo->head) return;
+
+  if (++undo->index == MaxActionCount) undo->index = 0;
+
+  Action* action = &undo->actions[undo->index];
+
+  handle_action(window, action, false);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void handle_insert_newline(Window* window) {
+  push_action(window);
+
+  Action* action = get_next_action(window);
+  action->type = ActionTypeInsertNewline;
+  action->x = window->cursor_x;
+  action->y = window->cursor_y;
+
+  if (window->previous_keycode == '{') {
+    action->flags |= ActionFlagKeycodeWasBrace;
+  }
+
+  handle_action(window, action, false);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void handle_insert_character(Window* window, char c) {
+  Undo* undo = &window->file->undo;
+
+  if (undo->buffer.count) {
+    if (window->cursor_x != undo->x + 1 || window->cursor_y != undo->y) {
+      push_action(window);
+    }
+  }
+
+  string_append(&undo->buffer, c);
+  undo->x = window->cursor_x;
+  undo->y = window->cursor_y;
+  undo->delete = false;
+
+  Action action = {0};
+  action.type = ActionTypeInsert;
+  action.data = &c;
+  action.size = 1;
+  action.x = window->cursor_x;
+  action.y = window->cursor_y;
+  handle_action(window, &action, false);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void handle_delete_character(Window* window) {
   File* file = window->file;
   Line* line = file->lines.items[window->cursor_y];
+  Undo* undo = &window->file->undo;
 
   if (window->cursor_x) {
-    string_remove(&line->chars, window->cursor_x - 1);
-    update_window_cursor_x(window, window->cursor_x - 1);
-    render_line(file, line);
+    char c = line->chars.items[window->cursor_x - 1];
+
+    if (undo->buffer.count) {
+      if (window->cursor_x != undo->x && window->cursor_y != undo->y) {
+        push_action(window);
+      }
+      if (!undo->delete) {
+        push_action(window);
+      }
+    }
+
+    undo->delete = true;
+    undo->x = window->cursor_x - 1;
+    undo->y = window->cursor_y;
+    string_append(&undo->buffer, c);
+
+    Action action = {0};
+    action.type = ActionTypeDelete;
+    action.data = &c;
+    action.x = window->cursor_x - 1;
+    action.y = window->cursor_y;
+    action.size = 1;
+
+    handle_action(window, &action, false);
   }
   else if (window->cursor_y) {
+    push_action(window);
+
     Line* prev_line = file->lines.items[window->cursor_y - 1];
+    Action* action = get_next_action(window);
 
-    update_window_cursor_x(window, prev_line->chars.count);
-    update_window_cursor_y(window, window->cursor_y - 1);
+    action->type = ActionTypeDeleteNewline;
+    action->x = prev_line->chars.count;
+    action->y = window->cursor_y - 1;
 
-    string_append_multiple(&prev_line->chars, line->chars.items, line->chars.count);
-    render_line(file, prev_line);
-
-    delete_line(window->file, window->cursor_y + 1);
+    handle_action(window, action, false);
   }
 
   file->saved = false;
@@ -1320,146 +1740,64 @@ static int get_delete_count(Window* window, char* data, int cursor, bool ctrl) {
 
 //--------------------------------------------------------------------------------------------------
 
-static void delete_character_or_word(Window* window, bool ctrl) {
+static void handle_delete(Window* window, bool ctrl) {
   File* file = window->file;
   Line* line = file->lines.items[window->cursor_y];
   int count = get_delete_count(window, line->chars.items, window->cursor_x, ctrl);
+
   while (count--) {
-    delete_character(window);
+    handle_delete_character(window);
   }
 }
 
 //--------------------------------------------------------------------------------------------------
 
-static void get_block_marks(Window* window, int* start_x, int* start_y, int* end_x, int* end_y) {
-  if (window->mark_y > window->cursor_y || (window->mark_y == window->cursor_y && window->mark_x > window->cursor_x)) {
-    *start_x = window->cursor_x;
-    *start_y = window->cursor_y;
-
-    *end_x = window->mark_x;
-    *end_y = window->mark_y;
-  }
-  else {
-    *start_x = window->mark_x;
-    *start_y = window->mark_y;
-    
-    *end_x = window->cursor_x;
-    *end_y = window->cursor_y;
-  }
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void insert_block(Window* window, char* data, int size) {
-  File* file = window->file;
-  Line* line = file->lines.items[window->cursor_y];
-
-  string_clear(&buffer);
-  string_append_multiple(&buffer, &line->chars.items[window->cursor_x], line->chars.count - window->cursor_x);
-  string_truncate(&line->chars, window->cursor_x);
-
-  int line_count = 0;
-  for (int i = 0; i < size; i++) {
-    if (data[i] == '\n') {
-      line_count++;
-    }
-  }
-
-  insert_lines(file, window->cursor_y + 1, line_count);
-
-  int index = 0;
-  int start = 0;
-
-  while (index < size) {
-    while (index < size && data[index] != '\n') {
-      index++;
-    }
-
-    string_append_multiple(&line->chars, &data[start], index - start);
-    render_line(file, line);
-
-    if (index >= size) break;
-
-    update_window_cursor_y(window, window->cursor_y + 1);
-    line = file->lines.items[window->cursor_y];
-
-    index++;
-    start = index;
-  }
-
-  update_window_cursor_x(window, line->chars.count);
-
-  if (buffer.count) {
-    string_append_multiple(&line->chars, buffer.items, buffer.count);
-    render_line(file, line);
-  }
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void delete_block(Window* window) {
+static void handle_cut(Window* window) {
   int start_x, start_y, end_x, end_y;
   get_block_marks(window, &start_x, &start_y, &end_x, &end_y);
 
-  File* file = window->file;
-  Line* line = file->lines.items[start_y];
+  copy_block(window, start_x, start_y, end_x, end_y);
 
-  string_clear(&buffer);
-  string_append_multiple(&buffer, line->chars.items, start_x);
+  Action* action = get_next_action(window);
+  action->x = start_x;
+  action->y = start_y;
 
-  delete_lines(file, start_y, end_y - start_y);
-  line = file->lines.items[start_y];
+  set_action_data(action, clipboard.items, clipboard.size, false);
+  action->type = ActionTypeDelete;
 
-  string_remove_multiple(&line->chars, 0, end_x);
-  string_insert_multiple(&line->chars, buffer.items, buffer.count, 0);
-  
-  update_window_cursor_x(window, buffer.count);
-  update_window_cursor_y(window, start_y);
-
-  line->redraw = true;
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void copy_block(Window* window) {
-  int start_x, start_y, end_x, end_y;
-  get_block_marks(window, &start_x, &start_y, &end_x, &end_y);
-
-  string_clear(&clipboard);
-
-  File* file = window->file;
-  Line* line = file->lines.items[start_y];
-
-  while (start_y != end_y) {
-    string_append_multiple(&clipboard, &line->chars.items[start_x], line->chars.count - start_x);
-    string_append(&clipboard, '\n');
-    render_line(file, line);
-
-    line = file->lines.items[++start_y];
-    start_x = 0;
+  if (window->cursor_x == start_x) {
+    // Cursor is first, then mark, doing deletes the block, undoing should get back to the cursor aka. the start.
+    action->flags |= ActionFlagCoordinateIsCursor;
   }
 
-  string_append_multiple(&clipboard, &line->chars.items[start_x], end_x - start_x);
-  render_line(file, line);
+  handle_action(window, action, false);
 }
 
 //--------------------------------------------------------------------------------------------------
 
-static void cut(Window* window) {
-  copy_block(window);
-  delete_block(window);
+static void handle_copy(Window* window) {
+  int start_x, start_y, end_x, end_y;
+  get_block_marks(window, &start_x, &start_y, &end_x, &end_y);
+  copy_block(window, start_x, start_y, end_x, end_y);
 }
 
 //--------------------------------------------------------------------------------------------------
 
-static void copy(Window* window) {
-  copy_block(window);
-}
+static void handle_paste(Window* window) {
+  Action* action = get_next_action(window);
 
-//--------------------------------------------------------------------------------------------------
+  action->x = window->cursor_x;  
+  action->y = window->cursor_y;  
 
-static void paste(Window* window) {
-  insert_block(window, clipboard.items, clipboard.count);
+  set_action_data(action, clipboard.items, clipboard.count, false);
+
+  action->type = ActionTypeInsert;
+
+  if (clipboard_cursor_goes_before_data) {
+    action->flags |= ActionFlagCoordinateIsCursor;
+  }
+
+  handle_action(window, action, false);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1485,9 +1823,6 @@ static void exit_minibar_mode(Window* window) {
   window->minibar_cursor = 0;
   window->minibar_offset = 0;
 }
-
-//--------------------------------------------------------------------------------------------------
-
 
 //--------------------------------------------------------------------------------------------------
 
@@ -1576,7 +1911,7 @@ static void editor_handle_keypress(Window* window, int keycode) {
       break;
 
     case KeyCodeCtrlDelete:
-      delete_character_or_word(window, true);
+      handle_delete(window, true);
       break;
 
     case KeyCodeCtrlF:
@@ -1584,17 +1919,17 @@ static void editor_handle_keypress(Window* window, int keycode) {
       break;
 
     case KeyCodeDelete:
-      delete_character_or_word(window, false);
+      handle_delete(window, false);
       break;
 
     case KeyCodeTab:
       for (int i = 0; i < EditorSpacesPerTab; i++) {
-        insert_character(window, ' ');
+        handle_insert_character(window, ' ');
       }
       break;
 
     case KeyCodeEnter:
-      insert_newline(window);
+      handle_insert_newline(window);
       break;
 
     case UserKeyFocusNext:
@@ -1624,15 +1959,23 @@ static void editor_handle_keypress(Window* window, int keycode) {
       break;
 
     case UserKeyCut:
-      cut(window);
+      handle_cut(window);
       break;
 
     case UserKeyCopy:
-      copy(window);
+      handle_copy(window);
       break;
 
     case UserKeyPaste:
-      paste(window);
+      handle_paste(window);
+      break;
+
+    case UserKeyUndo:
+      handle_undo(window);
+      break;
+
+    case UserKeyRedo:
+      handle_redo(window);
       break;
 
     case UserKeySave:
@@ -1641,7 +1984,7 @@ static void editor_handle_keypress(Window* window, int keycode) {
 
     default:
       if (KeyCodePrintableStart <= keycode && keycode <= KeyCodePrintableEnd) {
-        insert_character(window, (char)keycode);
+        handle_insert_character(window, (char)keycode);
       }
       else {
         debug("Unhandled window keycode: %d\n", keycode);
@@ -2711,12 +3054,10 @@ static void editor_init() {
 //--------------------------------------------------------------------------------------------------
 
 int main() {
-  printf("test: %d\n", git_commit("Another commit", 14));
-  return 0;
   terminal_init();
   editor_init();
 
-  char path[] = "test/test.c";
+  char path[] = "test.c";
   File* file = open_file(path, sizeof(path) - 1);
   master_region.window->file = file;
   Window* window = split_window(master_region.window, false);

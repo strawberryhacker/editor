@@ -1000,6 +1000,14 @@ static int save_file(File* file) {
 
 //--------------------------------------------------------------------------------------------------
 
+static void save_all() {
+  for (int i = 0; i < files.count; i++) {
+    save_file(files.items[i]);
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+
 static FileState* get_file_state(Window* window, File* file) {
   for (int i = 0; i < window->file_states.count; i++) {
     FileState* state = window->file_states.items[i];
@@ -2400,13 +2408,13 @@ static void handle_command(Window* window) {
     reindent_block(window);
   }
   else if (skip_identifier(&data, "save all")) {
-    for (int i = 0; i < files.count; i++) {
-      save_file(files.items[i]);
-    }
+    save_all();
   }
   else if (skip_identifier(&data, "commit")) {
-    int size = strlen(data);
-    git_commit(data + 1, max(size - 1, 0));
+    save_all();
+    if (!git_commit(data + 1, max(strlen(data) - 1, 0))) {
+      display_error(window, "can't commit message");
+    }
   }
   else if (skip_identifier(&data, "comment")) {
     int linesize;

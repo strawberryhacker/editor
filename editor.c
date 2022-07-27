@@ -700,7 +700,7 @@ static int get_input() {
   int size = read(STDIN_FILENO, keys, sizeof(keys));
   if (!size) return KeyCodeNone;
 
-  if (0) {
+  if (1) {
     for (int i = 0; i < size; i++) {
       debug("%d, ", keys[i]);
     }
@@ -1240,6 +1240,29 @@ static void get_block_marks(Window* window, int* start_x, int* start_y, int* end
 
 //--------------------------------------------------------------------------------------------------
 
+static void get_changeable_block_marks(Window* window, int** start_x, int** start_y, int** end_x, int** end_y) {
+  if (window->mark_y > window->cursor_y || (window->mark_y == window->cursor_y && window->mark_x > window->cursor_x)) {
+    clipboard_cursor_before = true;
+
+    *start_x = &window->cursor_x;
+    *start_y = &window->cursor_y;
+
+    *end_x = &window->mark_x;
+    *end_y = &window->mark_y;
+  }
+  else {
+    clipboard_cursor_before = false;
+
+    *start_x = &window->mark_x;
+    *start_y = &window->mark_y;
+    
+    *end_x = &window->cursor_x;
+    *end_y = &window->cursor_y;
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+
 static void get_buffer_end_cursor(char* data, int size, int x, int y, int* end_x, int* end_y) {
   for (int i = 0; i < size; i++) {
     if (data[i] == '\n') {
@@ -1500,6 +1523,13 @@ static Action* create_new_action(Window* window) {
 
 //--------------------------------------------------------------------------------------------------
 
+static void mark_last_action_joint(Window* window) {
+  Undo* undo = &window->file->undo;
+  undo->actions[undo->index].joint = 1;
+}
+
+//--------------------------------------------------------------------------------------------------
+
 static void set_action_data(Action* action, char* data, int size, bool reverse) {
   if (action->data) {
     free(action->data);
@@ -1550,8 +1580,15 @@ static void handle_undo(Window* window) {
   Undo* undo = &window->file->undo;
 
   if (undo->index != undo->tail) {
+    int joint = undo->actions[undo->index].joint;
+
     handle_action(window, &undo->actions[undo->index], true);
     undo->index = decrement_undo_index(undo->index);
+
+    if (joint) {
+      handle_action(window, &undo->actions[undo->index], true);
+      undo->index = decrement_undo_index(undo->index);
+    }
   }
 }
 
@@ -1564,7 +1601,14 @@ static void handle_redo(Window* window) {
 
   if (undo->index != undo->head) {
     undo->index = increment_undo_index(undo->index);
+
+    int joint = undo->actions[undo->index].joint;
     handle_action(window, &undo->actions[undo->index], false);
+
+    if (joint) {
+      undo->index = increment_undo_index(undo->index);
+      handle_action(window, &undo->actions[undo->index], false);
+    }
   }
 }
 
@@ -1774,6 +1818,120 @@ static void handle_paste(Window* window) {
   }
 
   handle_action(window, action, false);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void change_block_based_on_y(Window* window) {
+  int* start_x;
+  int* start_y;
+  int* end_x;
+  int* end_y;
+  get_changeable_block_marks(window, &start_x, &start_y, &end_x, &end_y);
+
+  *start_x = 0;
+  *end_x = window->file->lines.items[*end_y]->chars.count;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void reindent_block(Window* window) {
+  File* file = window->file;
+
+  if (!window->mark_valid) return;
+  if (!file->highlight) return;
+
+  change_block_based_on_y(window);
+
+  int start_x, start_y, end_x, end_y;
+  get_block_marks(window, &start_x, &start_y, &end_x, &end_y);
+
+  handle_cut(window);
+  mark_last_action_joint(window);
+
+  int indent = get_leading_spaces(file->lines.items[start_y]);
+
+  string_clear(&buffer);
+  string_extend(&buffer, clipboard.count);
+  string_append_multiple(&buffer, clipboard.items, clipboard.count);
+  string_clear(&clipboard);
+
+  char* data = buffer.items;
+  int size = buffer.size;
+
+  for (int i = 0; i < size; i++) {
+    string_append(&clipboard, data[i]);
+
+    if (data[i] == '\n') {
+      while (i < (size + 1) && data[i + 1] == ' ') {
+        debug("Skip\n");
+        i++;
+      }
+
+      if (data[i + 1] == '}') {
+        indent = max(indent - EditorSpacesPerTab, 0);
+        debug("Minus\n");
+      }
+
+      for (int j = 0; j < indent; j++) {
+        string_append(&clipboard, ' ');
+      }
+    }
+    else if (data[i] == '{') {
+      indent += EditorSpacesPerTab;
+    }
+  }
+
+  handle_paste(window);
+  mark_last_action_joint(window);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+// Probably enforce 
+static void  reformat_comment(Window* window, int linesize) {
+  File* file = window->file;
+
+  if (!window->mark_valid) return;
+  if (!file->highlight) return;
+
+
+  change_block_based_on_y(window);
+
+  handle_cut(window);
+  mark_last_action_joint(window);
+
+  string_clear(&buffer);
+  string_extend(&buffer, clipboard.count);
+  string_append_multiple(&buffer, clipboard.items, clipboard.count);
+  string_clear(&clipboard);
+
+  char* data = buffer.items;
+  int size = buffer.size;
+  int count = 0;
+
+  while (size > 3) {
+    string_append_multiple(&clipboard, "// ", 3);
+    data += 3;
+    size -= 3;
+
+    count = linesize - 3;
+
+    while (size && count) {
+      if (*data != '\n') {
+        string_append(&clipboard, *data);
+      }
+
+      data++;
+      size--;
+      count--;
+    }
+
+    string_append(&clipboard, '\n');
+  }
+
+  handle_paste(window);
+  mark_last_action_joint(window);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -2220,6 +2378,15 @@ static void handle_command(Window* window) {
     }
     else {
       display_error(window, "cant split");
+    }
+  }
+  else if (skip_identifier(&data, "reindent")) {
+    reindent_block(window);
+  }
+  else if (skip_identifier(&data, "comment")) {
+    int linesize;
+    if (read_number(&data, &linesize)) {
+      reformat_comment(window, linesize);
     }
   }
   else if (skip_identifier(&data, "theme")) {

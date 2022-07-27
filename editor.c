@@ -1822,68 +1822,81 @@ static void handle_paste(Window* window) {
 
 //--------------------------------------------------------------------------------------------------
 
-static void change_block_based_on_y(Window* window) {
+static void editing_comment_start(Window* window) {
   int* start_x;
   int* start_y;
   int* end_x;
   int* end_y;
+
   get_changeable_block_marks(window, &start_x, &start_y, &end_x, &end_y);
 
+  // Capture entire block between the y-cursors.
   *start_x = 0;
   *end_x = window->file->lines.items[*end_y]->chars.count;
+
+  handle_cut(window);
+  mark_last_action_joint(window);
+
+  string_clear(&buffer);
+  string_extend(&buffer, clipboard.count);
+  string_append_multiple(&buffer, clipboard.items, clipboard.count);
+  add_null_termination(&buffer);
+  string_clear(&clipboard);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void editing_command_end(Window* window) {
+  handle_paste(window);
+  mark_last_action_joint(window);
 }
 
 //--------------------------------------------------------------------------------------------------
 
 static void reindent_block(Window* window) {
   File* file = window->file;
-
   if (!window->mark_valid) return;
   if (!file->highlight) return;
 
-  change_block_based_on_y(window);
+  editing_comment_start(window);
 
   int start_x, start_y, end_x, end_y;
   get_block_marks(window, &start_x, &start_y, &end_x, &end_y);
 
-  handle_cut(window);
-  mark_last_action_joint(window);
-
   int indent = get_leading_spaces(file->lines.items[start_y]);
-
-  string_clear(&buffer);
-  string_extend(&buffer, clipboard.count);
-  string_append_multiple(&buffer, clipboard.items, clipboard.count);
-  string_clear(&clipboard);
-
   char* data = buffer.items;
-  int size = buffer.size;
 
-  for (int i = 0; i < size; i++) {
-    string_append(&clipboard, data[i]);
 
-    if (data[i] == '\n') {
-      while (i < (size + 1) && data[i + 1] == ' ') {
-        debug("Skip\n");
-        i++;
-      }
-
-      if (data[i + 1] == '}') {
-        indent = max(indent - EditorSpacesPerTab, 0);
-        debug("Minus\n");
-      }
-
-      for (int j = 0; j < indent; j++) {
-        string_append(&clipboard, ' ');
-      }
+  while (*data) {
+    while (*data == ' ') {
+      data++;
     }
-    else if (data[i] == '{') {
-      indent += EditorSpacesPerTab;
+
+    if (*data == '}') {
+      indent = max(indent - EditorSpacesPerTab, 0);
+    }
+
+    for (int j = 0; j < indent; j++) {
+      string_append(&clipboard, ' ');
+    }
+
+    char prev = *data;
+
+    while (*data) {
+      char c = *data++;
+      string_append(&clipboard, c);
+      if (c == '\n') {
+        if (prev == '{') {
+          indent += EditorSpacesPerTab;
+        }
+        break;
+      }
+
+      prev = c;
     }
   }
 
-  handle_paste(window);
-  mark_last_action_joint(window);
+  editing_command_end(window);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1895,17 +1908,8 @@ static void  reformat_comment(Window* window, int linesize) {
   if (!window->mark_valid) return;
   if (!file->highlight) return;
 
-
-  change_block_based_on_y(window);
-
-  handle_cut(window);
-  mark_last_action_joint(window);
-
-  string_clear(&buffer);
-  string_extend(&buffer, clipboard.count);
-  string_append_multiple(&buffer, clipboard.items, clipboard.count);
-  string_clear(&clipboard);
-
+  editing_comment_start(window);
+  
   char* data = buffer.items;
   int size = buffer.size;
   int count = 0;
@@ -1930,8 +1934,7 @@ static void  reformat_comment(Window* window, int linesize) {
     string_append(&clipboard, '\n');
   }
 
-  handle_paste(window);
-  mark_last_action_joint(window);
+  editing_command_end(window);
 }
 
 //--------------------------------------------------------------------------------------------------

@@ -27,14 +27,14 @@ This is a simple terminal text editor. Some inspiration is taken from Kilo and E
 - Support search based on the Boyer–Moore algorithm. The entire file is searched for a pattern, and all matches are highlighted. Match count etc. is visible on the minibar. The match closest to the cursor is marked. Matches can be browsed with the arrows. Esc resets to the previous location, enter moves cursor to the current match and closes the search minibar.
 - Support saving file (I added a mark for unsaved files).
 - Otherwise it is pretty customizable.
+- Undo/redo buffer.
+- Reindent block.
+- Reformat comments to have a linesize.
+- Save all command
+- Github commit command
 
 ## Todo
 
-- Undo/redo buffer.
 - Tabs support (for makefiles, I don't know about this).
 - Replace in file (auto replace with y/n confirmation).
-- Reindent block.
-- Reformat comments to have a linesize.
 - Exiting while unsaved changes exist triggers save confirmation.
-- Save all command
-- Github commit commandaosenuth

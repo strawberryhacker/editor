@@ -331,9 +331,18 @@ enum {
   ActionTypeCount,
 };
 
+//--------------------------------------------------------------------------------------------------
+
 enum {
-  ActionFlagCoordinateIsCursor      = 1 << 0,
-  ActionFlagKeycodeWasBrace = 1 << 1,
+  ActionDo,
+  ActionUndo,
+};
+
+//--------------------------------------------------------------------------------------------------
+
+enum {
+  ActionFlagCursorBefore = 1 << 0,
+  ActionFlagLastKeycodeWasOpenBrace  = 1 << 1,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -458,7 +467,7 @@ static Region master_region;
 static WindowArray windows;
 static FileArray files;
 static String clipboard;
-static bool clipboard_cursor_goes_before_data;
+static bool clipboard_cursor_before;
 
 static String buffer;
 
@@ -1186,98 +1195,6 @@ static void update_window_offset_y(Window* window, int offset) {
 
 //--------------------------------------------------------------------------------------------------
 
-static void print_action(Action* action) {
-  switch (action->type) {
-    case ActionTypeInsert:
-      debug("[%d %d] insert: [%d] %.*s\n", action->x, action->y, action->size, action->size, action->data);
-      break;
-    case ActionTypeDelete:
-      debug("[%d %d] delete: [%d] %.*s\n", action->x, action->y, action->size, action->size, action->data);
-      break;
-    case ActionTypeInsertNewline:
-      debug("[%d %d] insert newline\n", action->x, action->y);
-      break;
-    case ActionTypeDeleteNewline:
-      debug("[%d %d] delete newline\n", action->x, action->y);
-      break;
-  }
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static Action* get_next_action(Window* window) {
-  Undo* undo = &window->file->undo;
-
-  if (++undo->index == MaxActionCount) undo->index = 0;
-  undo->head = undo->index;
-
-  return &undo->actions[undo->index];
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void set_action_data(Action* action, char* data, int size, bool reverse) {
-  if (action->data) {
-    free(action->data);
-  }
-
-  action->data = malloc(size);
-  action->size = size;
-
-  if (reverse) {
-    for (int i = 0; i < size; i++) {
-      action->data[i] = data[size - i - 1];
-    }
-  }
-  else {
-    memcpy(action->data, data, size);
-  }
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void push_action(Window* window) {
-  Undo* undo = &window->file->undo;
-  if (!undo->buffer.count) return;
-
-  Action* action = get_next_action(window);
-
-  if (undo->delete) {
-    action->type = ActionTypeDelete;
-    action->x = undo->x;
-    action->y = undo->y;
-    set_action_data(action, undo->buffer.items, undo->buffer.count, true);
-  }
-  else {
-    
-    action->type = ActionTypeInsert;
-    action->x = undo->x - (undo->buffer.count - 1);
-    action->y = undo->y;
-    set_action_data(action, undo->buffer.items, undo->buffer.count, false);
-  }
-
-  string_clear(&undo->buffer);
-}
-
-//--------------------------------------------------------------------------------------------------
-
-static void get_end_mark(char* data, int size, int x, int y, int* end_x, int* end_y) {
-  for (int i = 0; i < size; i++) {
-    if (data[i] == '\n') {
-      y++;
-      x = 0;
-    }
-    else {
-      x++;
-    }
-  }
-
-  *end_x = x;
-  *end_y = y;
-}
-
-//--------------------------------------------------------------------------------------------------
-
 static void append_spaces(Line* line, int count) {
   while (count--) {
     string_append(&line->chars, ' ');
@@ -1302,6 +1219,8 @@ static char get_last_char(Line* line) {
 
 static void get_block_marks(Window* window, int* start_x, int* start_y, int* end_x, int* end_y) {
   if (window->mark_y > window->cursor_y || (window->mark_y == window->cursor_y && window->mark_x > window->cursor_x)) {
+    clipboard_cursor_before = true;
+
     *start_x = window->cursor_x;
     *start_y = window->cursor_y;
 
@@ -1309,6 +1228,8 @@ static void get_block_marks(Window* window, int* start_x, int* start_y, int* end
     *end_y = window->mark_y;
   }
   else {
+    clipboard_cursor_before = false;
+
     *start_x = window->mark_x;
     *start_y = window->mark_y;
     
@@ -1319,13 +1240,30 @@ static void get_block_marks(Window* window, int* start_x, int* start_y, int* end
 
 //--------------------------------------------------------------------------------------------------
 
-static void insert_block(Window* window, char* data, int size, int start_x, int start_y, int* end_x, int* end_y) {
-  debug("Insert %d [%.*s] %d %d\n", size, size, data, start_x, start_y);
-  if (data[0] == '\n') {
-    debug("Ok\n");
+static void get_buffer_end_cursor(char* data, int size, int x, int y, int* end_x, int* end_y) {
+  for (int i = 0; i < size; i++) {
+    if (data[i] == '\n') {
+      y++;
+      x = 0;
+    }
+    else {
+      x++;
+    }
   }
+
+  *end_x = x;
+  *end_y = y;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void insert_block(Window* window, char* data, int size, int start_x, int start_y, bool cursor_before) {
+  int x = start_x;
+  int y = start_y;
+
   File* file = window->file;
   Line* line = file->lines.items[start_y];
+
 
   string_clear(&buffer);
   string_append_multiple(&buffer, &line->chars.items[start_x], line->chars.count - start_x);
@@ -1359,15 +1297,20 @@ static void insert_block(Window* window, char* data, int size, int start_x, int 
     start = index;
   }
 
-  *end_x = line->chars.count;
-  *end_y = start_y;
+  if (!cursor_before) {
+    x = line->chars.count;
+    y = start_y;
+  }
 
-  debug("Insert %d %d %d %d\n", start_x, start_y, *end_x, *end_y);
+  update_window_cursor_x(window, x);
+  update_window_cursor_y(window, y);
 
   if (buffer.count) {
     string_append_multiple(&line->chars, buffer.items, buffer.count);
     render_line(file, line);
   }
+
+  file->saved = false;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1386,23 +1329,19 @@ static void delete_block(Window* window, int start_x, int start_y, int end_x, in
   string_insert_multiple(&line->chars, buffer.items, buffer.count, 0);
   render_line(file, line);
   
-  update_window_cursor_x(window, buffer.count);
+  update_window_cursor_x(window, start_x);
   update_window_cursor_y(window, start_y);
 
-  line->redraw = true;
+  file->saved = false;
 }
 
 //--------------------------------------------------------------------------------------------------
 
 static void copy_block(Window* window, int start_x, int start_y, int end_x, int end_y) {
-  if (start_x == window->cursor_x) {
-    clipboard_cursor_goes_before_data = true;
-  }
-
-  string_clear(&clipboard);
-
   File* file = window->file;
   Line* line = file->lines.items[start_y];
+
+  string_clear(&clipboard);
 
   while (start_y != end_y) {
     string_append_multiple(&clipboard, &line->chars.items[start_x], line->chars.count - start_x);
@@ -1420,49 +1359,23 @@ static void copy_block(Window* window, int start_x, int start_y, int end_x, int 
 //--------------------------------------------------------------------------------------------------
 
 static void handle_action_type_insert(Window* window, Action* action, bool undo) {
-  int start_x = action->x;
-  int start_y = action->y;
-
-  int end_x, end_y;
-  get_end_mark(action->data, action->size, start_x, start_y, &end_x, &end_y);
-
   if (undo) {
-    delete_block(window, start_x, start_y, end_x, end_y);
-    update_window_cursor_x(window, start_x);
-    update_window_cursor_y(window, start_y);
+    int end_x, end_y;
+    get_buffer_end_cursor(action->data, action->size, action->x, action->y, &end_x, &end_y);
+    delete_block(window, action->x, action->y, end_x, end_y);
   }
   else {
-    insert_block(window, action->data, action->size, start_x, start_y, &end_x, &end_y);
-    if (action->flags & ActionFlagCoordinateIsCursor) {
-      update_window_cursor_x(window, start_x);
-      update_window_cursor_y(window, start_y);
-    }
-    else {
-      update_window_cursor_x(window, end_x);
-      update_window_cursor_y(window, end_y);
-    }
+    bool cursor_before = (action->flags & ActionFlagCursorBefore) != 0;
+    insert_block(window, action->data, action->size, action->x, action->y, cursor_before);
   }
+
+  window->file->saved = false;
 }
 
 //--------------------------------------------------------------------------------------------------
 
 static void handle_action_type_delete(Window* window, Action* action, bool undo) {
-  int start_x = action->x;
-  int start_y = action->y;
-
-  int end_x, end_y;
-  get_end_mark(action->data, action->size, start_x, start_y, &end_x, &end_y);
-
-  if (undo) {
-    insert_block(window, action->data, action->size, start_x, start_y, &end_x, &end_y);
-    update_window_cursor_x(window, end_x);
-    update_window_cursor_y(window, end_y);
-  }
-  else {
-    delete_block(window, start_x, start_y, end_x, end_y);
-    update_window_cursor_x(window, start_x);
-    update_window_cursor_y(window, start_y);
-  }
+  handle_action_type_insert(window, action, !undo);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1475,23 +1388,23 @@ static void handle_action_type_insert_newline(Window* window, Action* action, bo
   int original_indent = get_leading_spaces(line);
   int indent = original_indent;
 
-  // Detect indentation and brace.
+  // Detect indentation and brace completion.
   if (action->x && line->chars.items[action->x - 1] == '{') {
-    if (action->x == line->chars.count && (action->flags & ActionFlagKeycodeWasBrace)) {
+    if (action->x == line->chars.count && (action->flags & ActionFlagLastKeycodeWasOpenBrace)) {
       line_count = 2;
     }
 
     indent += EditorSpacesPerTab;
   }
-  debug("-----Linecount: %d\n", line_count);
-  debug("%d %d \n", action->x, line->chars.count);
 
   if (undo) {
-    debug("Linecount: %d\n", line_count);
     Line* next = file->lines.items[action->y + 1];
+
     string_append_multiple(&line->chars, &next->chars.items[indent], next->chars.count - indent);
     render_line(file, line);
+
     delete_lines(file, action->y + 1, line_count);
+
     update_window_cursor_x(window, action->x);
     update_window_cursor_y(window, action->y);
   }
@@ -1525,14 +1438,18 @@ static void handle_action_type_insert_newline(Window* window, Action* action, bo
 
 static void handle_action_type_delete_newline(Window* window, Action* action, bool undo) {
   char c = '\n';
-  Action tmp = *action;
-  tmp.data = &c;
-  tmp.size = 1;
-  tmp.type = ActionTypeDelete;
-  handle_action(window, &tmp, undo);
+
+  action->data = &c;
+  action->size = 1;
+  action->type = ActionTypeDelete;
+
+  handle_action(window, action, undo);
+
+  action->type = ActionTypeDeleteNewline;
 }
 
 //--------------------------------------------------------------------------------------------------
+static void print_action(Action* action);
 
 static void handle_action(Window* window, Action* action, bool undo) {
   switch (action->type) {
@@ -1552,63 +1469,117 @@ static void handle_action(Window* window, Action* action, bool undo) {
       handle_action_type_delete_newline(window, action, undo);
       break;
   }
+}
 
-  debug("\n----------------------------\n");
-  Undo* u = &window->file->undo;
-  for (int i = u->tail + 1; i <= u->index; i++) {
-    debug("%2d - ", i);
-    print_action(&u->actions[i]);
+//--------------------------------------------------------------------------------------------------
+
+static int increment_undo_index(int index) {
+  return (++index == MaxActionCount) ? 0 : index;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static int decrement_undo_index(int index) {
+  return (--index < 0) ? MaxActionCount - 1 : index;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static Action* create_new_action(Window* window) {
+  Undo* undo = &window->file->undo;
+
+  undo->index = increment_undo_index(undo->index);
+  undo->head = undo->index;
+
+  if (undo->index == undo->tail) {
+    undo->tail = increment_undo_index(undo->tail);
   }
-  debug("Buffer [%d]: %.*s\n", u->buffer.count, u->buffer.count, u->buffer.items);
-  debug("----------------------------\n");
+
+  return &undo->actions[undo->index];
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void set_action_data(Action* action, char* data, int size, bool reverse) {
+  if (action->data) {
+    free(action->data);
+  }
+
+  action->data = malloc(size);
+  action->size = size;
+
+  if (reverse) {
+    for (int i = 0; i < size; i++) {
+      action->data[i] = data[size - i - 1];
+    }
+  }
+  else {
+    memcpy(action->data, data, size);
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+
+static void flush_action_buffer(Window* window) {
+  Undo* undo = &window->file->undo;
+  if (!undo->buffer.count) return;
+
+  Action* action = create_new_action(window);
+
+  if (undo->delete) {
+    action->type = ActionTypeDelete;
+    action->x = undo->x;
+    action->y = undo->y;
+    set_action_data(action, undo->buffer.items, undo->buffer.count, true);
+  }
+  else {
+    action->type = ActionTypeInsert;
+    action->x = undo->x - (undo->buffer.count - 1);
+    action->y = undo->y;
+    set_action_data(action, undo->buffer.items, undo->buffer.count, false);
+  }
+
+  string_clear(&undo->buffer);
 }
 
 //--------------------------------------------------------------------------------------------------
 
 static void handle_undo(Window* window) {
+  flush_action_buffer(window);
+
   Undo* undo = &window->file->undo;
-  
-  if (undo->buffer.count) {
-    push_action(window);
+
+  if (undo->index != undo->tail) {
+    handle_action(window, &undo->actions[undo->index], true);
+    undo->index = decrement_undo_index(undo->index);
   }
-  
-  if (undo->index == undo->tail) return;
-
-  Action* action = &undo->actions[undo->index];
-  if (--undo->index < 0) undo->index = MaxActionCount - 1;
-
-  handle_action(window, action, true);
 }
 
 //--------------------------------------------------------------------------------------------------
 
 static void handle_redo(Window* window) {
+  flush_action_buffer(window);
+
   Undo* undo = &window->file->undo;
-  if (undo->buffer.count) {
-    push_action(window);
+
+  if (undo->index != undo->head) {
+    undo->index = increment_undo_index(undo->index);
+    handle_action(window, &undo->actions[undo->index], false);
   }
-  
-  if (undo->index == undo->head) return;
-
-  if (++undo->index == MaxActionCount) undo->index = 0;
-
-  Action* action = &undo->actions[undo->index];
-
-  handle_action(window, action, false);
 }
 
 //--------------------------------------------------------------------------------------------------
 
 static void handle_insert_newline(Window* window) {
-  push_action(window);
+  flush_action_buffer(window);
 
-  Action* action = get_next_action(window);
+  Action* action = create_new_action(window);
   action->type = ActionTypeInsertNewline;
   action->x = window->cursor_x;
   action->y = window->cursor_y;
 
   if (window->previous_keycode == '{') {
-    action->flags |= ActionFlagKeycodeWasBrace;
+    action->flags |= ActionFlagLastKeycodeWasOpenBrace;
   }
 
   handle_action(window, action, false);
@@ -1619,10 +1590,8 @@ static void handle_insert_newline(Window* window) {
 static void handle_insert_character(Window* window, char c) {
   Undo* undo = &window->file->undo;
 
-  if (undo->buffer.count) {
-    if (window->cursor_x != undo->x + 1 || window->cursor_y != undo->y) {
-      push_action(window);
-    }
+  if (undo->buffer.count && (window->cursor_x != undo->x + 1 || window->cursor_y != undo->y || undo->delete)) {
+    flush_action_buffer(window);
   }
 
   string_append(&undo->buffer, c);
@@ -1630,12 +1599,16 @@ static void handle_insert_character(Window* window, char c) {
   undo->y = window->cursor_y;
   undo->delete = false;
 
-  Action action = {0};
-  action.type = ActionTypeInsert;
-  action.data = &c;
-  action.size = 1;
-  action.x = window->cursor_x;
-  action.y = window->cursor_y;
+  Action action = {
+    .type  = ActionTypeInsert,
+    .flags = 0,
+    .joint = 0,
+    .data  = &c,
+    .size  = 1,
+    .x     = window->cursor_x,
+    .y     = window->cursor_y,
+  };
+
   handle_action(window, &action, false);
 }
 
@@ -1647,45 +1620,40 @@ static void handle_delete_character(Window* window) {
   Undo* undo = &window->file->undo;
 
   if (window->cursor_x) {
-    char c = line->chars.items[window->cursor_x - 1];
-
-    if (undo->buffer.count) {
-      if (window->cursor_x != undo->x && window->cursor_y != undo->y) {
-        push_action(window);
-      }
-      if (!undo->delete) {
-        push_action(window);
-      }
+    if (undo->buffer.count && (window->cursor_x != undo->x - 1 || window->cursor_y != undo->y || !undo->delete)) {
+      flush_action_buffer(window);
     }
 
-    undo->delete = true;
+    char c = line->chars.items[window->cursor_x - 1];
+
+    string_append(&undo->buffer, c);
     undo->x = window->cursor_x - 1;
     undo->y = window->cursor_y;
-    string_append(&undo->buffer, c);
+    undo->delete = true;
 
-    Action action = {0};
-    action.type = ActionTypeDelete;
-    action.data = &c;
-    action.x = window->cursor_x - 1;
-    action.y = window->cursor_y;
-    action.size = 1;
+    Action action = {
+      .type  = ActionTypeDelete,
+      .flags = 0,
+      .joint = 0,
+      .data  = &c,
+      .size  = 1,
+      .x     = window->cursor_x - 1,
+      .y     = window->cursor_y,
+    };
 
     handle_action(window, &action, false);
   }
   else if (window->cursor_y) {
-    push_action(window);
+    flush_action_buffer(window);
 
-    Line* prev_line = file->lines.items[window->cursor_y - 1];
-    Action* action = get_next_action(window);
+    Action* action = create_new_action(window);
 
     action->type = ActionTypeDeleteNewline;
-    action->x = prev_line->chars.count;
+    action->x = file->lines.items[window->cursor_y - 1]->chars.count;
     action->y = window->cursor_y - 1;
 
     handle_action(window, action, false);
   }
-
-  file->saved = false;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1743,6 +1711,7 @@ static int get_delete_count(Window* window, char* data, int cursor, bool ctrl) {
 static void handle_delete(Window* window, bool ctrl) {
   File* file = window->file;
   Line* line = file->lines.items[window->cursor_y];
+
   int count = get_delete_count(window, line->chars.items, window->cursor_x, ctrl);
 
   while (count--) {
@@ -1753,21 +1722,25 @@ static void handle_delete(Window* window, bool ctrl) {
 //--------------------------------------------------------------------------------------------------
 
 static void handle_cut(Window* window) {
+  flush_action_buffer(window);
+
   int start_x, start_y, end_x, end_y;
   get_block_marks(window, &start_x, &start_y, &end_x, &end_y);
 
   copy_block(window, start_x, start_y, end_x, end_y);
 
-  Action* action = get_next_action(window);
+  Action* action = create_new_action(window);
+
+  set_action_data(action, clipboard.items, clipboard.size, false);
+
+  action->type = ActionTypeDelete;
+  action->flags = 0;
+  action->joint = 0;
   action->x = start_x;
   action->y = start_y;
 
-  set_action_data(action, clipboard.items, clipboard.size, false);
-  action->type = ActionTypeDelete;
-
-  if (window->cursor_x == start_x) {
-    // Cursor is first, then mark, doing deletes the block, undoing should get back to the cursor aka. the start.
-    action->flags |= ActionFlagCoordinateIsCursor;
+  if (clipboard_cursor_before) {
+    action->flags |= ActionFlagCursorBefore;
   }
 
   handle_action(window, action, false);
@@ -1784,17 +1757,20 @@ static void handle_copy(Window* window) {
 //--------------------------------------------------------------------------------------------------
 
 static void handle_paste(Window* window) {
-  Action* action = get_next_action(window);
+  flush_action_buffer(window);
 
-  action->x = window->cursor_x;  
-  action->y = window->cursor_y;  
+  Action* action = create_new_action(window);
 
   set_action_data(action, clipboard.items, clipboard.count, false);
 
   action->type = ActionTypeInsert;
+  action->flags = 0;
+  action->joint = 0;
+  action->x = window->cursor_x;  
+  action->y = window->cursor_y;
 
-  if (clipboard_cursor_goes_before_data) {
-    action->flags |= ActionFlagCoordinateIsCursor;
+  if (clipboard_cursor_before) {
+    action->flags |= ActionFlagCursorBefore;
   }
 
   handle_action(window, action, false);

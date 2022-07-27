@@ -1901,7 +1901,6 @@ static void reindent_block(Window* window) {
 
 //--------------------------------------------------------------------------------------------------
 
-// Probably enforce 
 static void  reformat_comment(Window* window, int linesize) {
   File* file = window->file;
 
@@ -1914,10 +1913,16 @@ static void  reformat_comment(Window* window, int linesize) {
   int size = buffer.size;
   int count = 0;
 
-  while (size > 3) {
-    string_append_multiple(&clipboard, "// ", 3);
-    data += 3;
-    size -= 3;
+  char* prefix = file->highlight->single_line_comment_start;
+  int prefix_length = strlen(prefix);
+
+  while (size > prefix_length + 1) {
+    string_append_multiple(&clipboard, prefix, prefix_length);
+    string_append(&clipboard, ' ');
+
+    // Not the best way...
+    data += prefix_length + 1;
+    size -= prefix_length + 1;
 
     count = linesize - 3;
 

@@ -1664,7 +1664,7 @@ static void handle_delete_character(Window* window) {
   Undo* undo = &window->file->undo;
 
   if (window->cursor_x) {
-    if (undo->buffer.count && (window->cursor_x != undo->x - 1 || window->cursor_y != undo->y || !undo->delete)) {
+    if (undo->buffer.count && (window->cursor_x != undo->x || window->cursor_y != undo->y || !undo->delete)) {
       flush_action_buffer(window);
     }
 
@@ -2065,7 +2065,15 @@ static void editor_handle_keypress(Window* window, int keycode) {
       break;
 
     case KeyCodeTab:
-      for (int i = 0; i < EditorSpacesPerTab; i++) {
+      int spaces = get_leading_spaces(window->file->lines.items[window->cursor_y]);
+      int rest = EditorSpacesPerTab;
+
+      if (window->cursor_x == spaces) {
+        int rest = spaces % EditorSpacesPerTab;
+        if (!rest) rest = EditorSpacesPerTab;
+      }
+
+      for (int i = 0; i < rest; i++) {
         handle_insert_character(window, ' ');
       }
       break;
@@ -2388,8 +2396,17 @@ static void handle_command(Window* window) {
       display_error(window, "cant split");
     }
   }
-  else if (skip_identifier(&data, "reindent")) {
+  else if (skip_identifier(&data, "indent")) {
     reindent_block(window);
+  }
+  else if (skip_identifier(&data, "save all")) {
+    for (int i = 0; i < files.count; i++) {
+      save_file(files.items[i]);
+    }
+  }
+  else if (skip_identifier(&data, "commit")) {
+    int size = strlen(data);
+    git_commit(data + 1, max(size - 1, 0));
   }
   else if (skip_identifier(&data, "comment")) {
     int linesize;
